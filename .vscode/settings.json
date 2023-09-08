@@ -1,0 +1,9 @@
+{
+    "cSpell.words": [
+        "pdeathsig",
+        "preexec",
+        "pyprctl",
+        "SIGKILL"
+    ],
+    "python.analysis.typeCheckingMode": "off"
+}
