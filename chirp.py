@@ -18,11 +18,11 @@ except ImportError:
 whisper_online_server = subprocess.Popen(["python", "../whisper_streaming/whisper_online_server.py", "--model", "medium.en", "--vad", "--min-chunk-size", "0.4"], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, preexec_fn=preexec_fn) 
 
 from TTS.api import TTS
-tts = TTS(model_name='tts_models/en/jenny/jenny', gpu=True,)
+tts = TTS(model_name='tts_models/multilingual/multi-dataset/xtts_v1', gpu=True,)
 # print(tts.speakers)
-# wav = tts.tts("This is a test? This is also a test!!", speed=2)
+wav = tts.tts("This is a test? This is also a test!!", speed=1.5, language="en", speaker_wav='/home/jdarp/Downloads/male.wav')
 import sounddevice as sd
-# sd.play(wav, samplerate=48000)
+sd.play(wav, samplerate=24000)
 
 
 arecord = subprocess.Popen(["arecord", "-f", "S16_LE", "-c1", "-r", "16000", "-t", "raw", "-D", "default"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, preexec_fn=preexec_fn)
@@ -30,8 +30,8 @@ nc = subprocess.Popen(["nc", "localhost", "43007"], stdin=arecord.stdout, stdout
 
 mlc_llm = subprocess.Popen(["../mlc-llm/build/mlc_chat_cli", "--local-id", "Llama-2-13b-chat-hf-q4f16_1"], cwd="../mlc-llm/", stdin=subprocess.PIPE, stdout=subprocess.PIPE, preexec_fn=preexec_fn)
 
-tts.tts('Hi.')
-sd.play(np.zeros(0), samplerate=48000)
+tts.tts('Hi.', speed=1.5, language="en", speaker_wav='/home/jdarp/Downloads/male.wav')
+# sd.play(np.zeros(0), samplerate=24000)
 print ("tts initialized")
 
 # Wait until whisper_online_server outputs "Listening" to stderr
@@ -89,8 +89,8 @@ def play_voice_clips():
         voice_clip = voice_clips_queue.get()
         if voice_clip is None:
             break
-        sd.play(voice_clip, samplerate=48000, )
-        wake_up_event.wait(timeout=len(voice_clip) / 48000.)
+        sd.play(voice_clip, samplerate=24000, )
+        wake_up_event.wait(timeout=len(voice_clip) / 24000.)
         wake_up_event.clear()
         sd.stop()
 
@@ -133,7 +133,7 @@ while True:
                     # Done generating text, speak it all.
                     to_speak = to_speak.replace("[INST]:", '').strip()
                     print (to_speak)
-                    voice_clips_queue.put(tts.tts(to_speak))
+                    voice_clips_queue.put(tts.tts(to_speak, speed=1.5, language="en", speaker_wav='/home/jdarp/Downloads/male.wav'))
                     break
                 # If we've generated a full sentence, send it to TTS right away before the rest of the response is generated.
                 sentences = tts.synthesizer.split_into_sentences(to_speak)
@@ -141,6 +141,8 @@ while True:
                     to_speak = sentences[-1]
                     for sentence in sentences[:-1]:
                         print (sentence)
-                        wav = tts.tts(sentence.strip())
+                        wav = tts.tts(sentence.strip(), speed=1.5, language="en", speaker_wav='/home/jdarp/Downloads/male.wav')
                         voice_clips_queue.put(wav)
             accumulated_output = ''
+
+
