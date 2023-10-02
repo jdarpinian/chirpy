@@ -1,8 +1,16 @@
+# # part of workaround for torchvision pyinstaller interaction bug from https://github.com/pytorch/vision/issues/1899
+# def script_method(fn, _rcb=None):
+#     return fn
+# def script(obj, optimize=True, _frames_up=0, _rcb=None):
+#     return obj    
+# import torch.jit
+# torch.jit.script_method = script_method 
+# torch.jit.script = script
+
 import time
 from timeit import default_timer as timer
 import subprocess
 import signal
-import pyprctl
 import select
 import sys
 import os
@@ -20,9 +28,10 @@ whisper_online_server = subprocess.Popen(["python", "../whisper_streaming/whispe
 from TTS.api import TTS
 tts = TTS(model_name='tts_models/en/jenny/jenny', gpu=True,)
 # print(tts.speakers)
-# wav = tts.tts("This is a test? This is also a test!!", speed=2)
+wav = tts.tts("This is a test? This is also a test!!", speed=2)
 import sounddevice as sd
-# sd.play(wav, samplerate=48000)
+sd.play(wav, samplerate=48000)
+sd.wait()
 
 
 arecord = subprocess.Popen(["arecord", "-f", "S16_LE", "-c1", "-r", "16000", "-t", "raw", "-D", "default"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, preexec_fn=preexec_fn)
