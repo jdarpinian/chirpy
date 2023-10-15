@@ -1,0 +1,3 @@
+[submodule "third_party/StyleTTS2"]
+	path = third_party/StyleTTS2
+	url = git@github.com:jdarpinian/StyleTTS2.git

@@ -16,6 +16,7 @@ import sys
 import os
 import json
 import numpy as np
+import sounddevice as sd
 
 try:
     import pyprctl
@@ -23,45 +24,114 @@ try:
 except ImportError:
     preexec_fn = None
 
-whisper_online_server = subprocess.Popen(["python", "../whisper_streaming/whisper_online_server.py", "--model", "medium.en", "--vad", "--min-chunk-size", "0.4"], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, preexec_fn=preexec_fn) 
+if os.name == 'nt':
+    # This only works on >=Win8, on <=Win7 processes cannot have more than one job object and the shell assigns one to all processes it creates.
+    # TODO: do whatever workaround is necessary on Win7 if we care to support it
+    # pip install pywin32
+    import win32api
+    import win32job
+    # hJob will be GC'd when our process exits and this will kill all children created with CreateProcess, hopefully no dependencies create processes in other sneaky ways
+    hJob = win32job.CreateJobObject(None, "")
+    extended_info = win32job.QueryInformationJobObject(hJob, win32job.JobObjectExtendedLimitInformation)
+    extended_info['BasicLimitInformation']['LimitFlags'] = win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    win32job.SetInformationJobObject(hJob, win32job.JobObjectExtendedLimitInformation, extended_info)
+    win32job.AssignProcessToJobObject(hJob, win32api.GetCurrentProcess())
 
-from TTS.api import TTS
-tts = TTS(model_name='tts_models/en/jenny/jenny', gpu=True,)
+
+
+# TODO: this is pinging Hugging Face via hf_hub something or other, gotta stop it from doing that. discovered when vpn was on and hf refused to respond
+# OMP: Error #15: Initializing libiomp5md.dll, but found libiomp5md.dll already initialized.
+os.environ['KMP_DUPLICATE_LIB_OK']='True'
+whisper_online_server = subprocess.Popen(["python", "../whisper_streaming/whisper_online_server.py", "--model", "medium.en", "--vad", "--min-chunk-size", "0.4"], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, preexec_fn=preexec_fn)
+
+
+from third_party.styletts2 import synthesize
+from exllama.chat import llm
+
+
+# from TTS.api import TTS
+# tts = TTS(model_name='tts_models/en/jenny/jenny', gpu=True,)
 # print(tts.speakers)
-wav = tts.tts("This is a test? This is also a test!!", speed=2)
-import sounddevice as sd
-sd.play(wav, samplerate=48000)
-sd.wait()
+# wav = synthesize("This is a test? This is also a test!!", speed=1.2)
+# sd.play(wav, samplerate=24000)
+# sd.wait()
 
+# only works on Linux
+# arecord = subprocess.Popen(["arecord", "-f", "S16_LE", "-c1", "-r", "16000", "-t", "raw", "-D", "default"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, preexec_fn=preexec_fn)
+# nc = subprocess.Popen(["nc", "localhost", "43007"], stdin=arecord.stdout, stdout=subprocess.PIPE, preexec_fn=preexec_fn)
 
-arecord = subprocess.Popen(["arecord", "-f", "S16_LE", "-c1", "-r", "16000", "-t", "raw", "-D", "default"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, preexec_fn=preexec_fn)
-nc = subprocess.Popen(["nc", "localhost", "43007"], stdin=arecord.stdout, stdout=subprocess.PIPE, preexec_fn=preexec_fn)
+# mlc_llm = subprocess.Popen(["../mlc-llm/build/mlc_chat_cli", "--local-id", "Llama-2-13b-chat-hf-q4f16_1"], cwd="../mlc-llm/", stdin=subprocess.PIPE, stdout=subprocess.PIPE, preexec_fn=preexec_fn)
 
-mlc_llm = subprocess.Popen(["../mlc-llm/build/mlc_chat_cli", "--local-id", "Llama-2-13b-chat-hf-q4f16_1"], cwd="../mlc-llm/", stdin=subprocess.PIPE, stdout=subprocess.PIPE, preexec_fn=preexec_fn)
-
-tts.tts('Hi.')
-sd.play(np.zeros(0), samplerate=48000)
+synthesize('Hi.')
+sd.play(np.zeros(0), samplerate=24000)
 print ("tts initialized")
 
 # Wait until whisper_online_server outputs "Listening" to stderr
 while True:
     output = whisper_online_server.stderr.readline()
     if output is not None:
-        output = output.decode()
+        output = output.decode(encoding='latin-1')
+        # print (output, end='')
         if "Listening" in output:
             break
 
-print ("whisper initialzied")
+import threading
+import socket
+import pyaudio
+import queue
+
+def stream_audio_to_server(audio_queue):
+    CHUNK = 4096
+    FORMAT = pyaudio.paInt16
+    CHANNELS = 1
+    RATE = 16000
+
+    p = pyaudio.PyAudio()
+
+    stream = p.open(format=FORMAT,
+                    channels=CHANNELS,
+                    rate=RATE,
+                    input=True,
+                    frames_per_buffer=CHUNK)
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect(('localhost', 43007))
+    s.setblocking(0)
+
+    while True:
+        data = stream.read(CHUNK)
+        s.sendall(data)
+        try:
+            chunk = s.recv(CHUNK)
+            if chunk:
+                chunk = chunk.decode()
+                chunk = chunk.strip()
+                # print ("received text from server")
+                # print ("text: " + chunk)
+                audio_queue.put(chunk)
+                chunk = None
+        except socket.error:
+            pass
+
+audio_queue = queue.Queue()
+audio_thread = threading.Thread(target=stream_audio_to_server, args=(audio_queue,), daemon=True)
+audio_thread.start()
+
+print ("whisper initialized")
 
 # Wait until mlc_llm finishes loading
-while True:
-    output = mlc_llm.stdout.read1()
-    if output is not None:
-        output = output.decode()
-        if "[INST]:" in output:
-            break
+# while True:
+#     output = mlc_llm.stdout.read1()
+#     if output is not None:
+#         output = output.decode()
+#         if "[INST]:" in output:
+#             break
+# for token in llm("Hi."):
+#     print(token, end=' ')
 
-print ("mlc-llm initialized")
+# print ("llm initialized")
+
+# TODO figure out how to warm up exllama2
 
 
 # TODO: echo cancellation to filter out our own voice allowing the use of laptop speakers/mic
@@ -98,58 +168,100 @@ def play_voice_clips():
         voice_clip = voice_clips_queue.get()
         if voice_clip is None:
             break
-        sd.play(voice_clip, samplerate=48000, )
-        wake_up_event.wait(timeout=len(voice_clip) / 48000.)
+        sd.play(voice_clip, samplerate=24000, )
+        wake_up_event.wait(timeout=len(voice_clip) / 24000.)
         wake_up_event.clear()
         sd.stop()
 
 voice_clips_thread = threading.Thread(target=play_voice_clips, daemon=True)
 voice_clips_thread.start()
 
+def read_stderr():
+    while True:
+        err = whisper_online_server.stderr.readline()
+        if err == '' and whisper_online_server.poll() is not None:
+            break
+        # if err:
+        #     print(err.strip())
 
-accumulated_output = ""
+stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+stderr_thread.start()
+
+
+
+from nltk.tokenize import sent_tokenize
+
+if os.name == 'nt':
+    import msvcrt
+
+accumulated_input = ""
+to_speak = ''
+llm_generator = iter(())
+print("entering main loop")
 while True:
     output = None
-    if select.select([whisper_online_server.stderr,],[],[],0.0)[0]:
-        whisper_online_server.stderr.read1() # gotta clear stderr pipe buffer or else it'll fill up and block
-    if select.select([sys.stdin,],[],[],0.0)[0]:
+    if msvcrt:
+        if msvcrt.kbhit():
+            output = os.read(sys.stdin.fileno(), 999999).decode().replace('\n', ' ').strip()
+    elif select.select([sys.stdin,],[],[],0.0)[0]:
         output = os.read(sys.stdin.fileno(), 999999).decode().replace('\n', ' ').strip()
-    elif select.select([nc.stdout,],[],[],0.0)[0]:
-        output = nc.stdout.read1().decode().replace('\x00', '').strip()
-        output = ' '.join([i for i in output.split(' ')[2:] if i]).strip()
     
+    if output is None and not audio_queue.empty():
+        output = audio_queue.get_nowait()
+        output = ''.join(c for c in output if c.isprintable())
+        output = output.replace('\n', ' ').strip()
+        output = ' '.join([i for i in output.split(' ')[2:] if i]).strip()
+        print (output)
+    
+    next_sentence_to_speak = None
+    try:
+        to_speak += next(llm_generator)
+        sentences = sent_tokenize(to_speak)
+        if len(sentences) > 1:
+            next_sentence_to_speak = sentences[0]
+            to_speak = ' '.join(sentences[1:])
+    except StopIteration:
+        if to_speak:
+            next_sentence_to_speak = to_speak
+            to_speak = ''
+    if next_sentence_to_speak:
+        print (next_sentence_to_speak)
+        voice_clips_queue.put(synthesize(next_sentence_to_speak.strip(), speed=1.3))
 
     if output is not None:
-        accumulated_output += output + ' '
-        accumulated_output = thanks_for_watching.sub("", accumulated_output)
+        accumulated_input += output + ' '
+        print ("accumulated input: " + accumulated_input)
+        accumulated_input = thanks_for_watching.sub("", accumulated_input)
 
-        if (len(accumulated_output.strip()) > 3 and not voice_clips_queue.empty()):
-            print ("interrupting because you said " + accumulated_output.strip())
+        if (len(accumulated_input.strip()) > 3 and not voice_clips_queue.empty()):
+            print ("interrupting because you said " + accumulated_input.strip())
             # TODO: remove unsaid part of response from context, this is actually really important
             while not voice_clips_queue.empty():
                 voice_clips_queue.get_nowait()
             wake_up_event.set()
 
-        if accumulated_output.strip().endswith(('.', '?', '!')) and not accumulated_output.strip().endswith('...') and len(accumulated_output.strip()) > 3:
-            print (accumulated_output.strip())
-            mlc_llm.stdin.write(accumulated_output.strip().encode() + b'\n')
-            mlc_llm.stdin.flush()
-            to_speak = ""
-            while True:
-                read = mlc_llm.stdout.read1().decode()
-                to_speak += read.replace("[/INST]:", "")
-                if "[INST]:" in read:
-                    # Done generating text, speak it all.
-                    to_speak = to_speak.replace("[INST]:", '').strip()
-                    print (to_speak)
-                    voice_clips_queue.put(tts.tts(to_speak))
-                    break
-                # If we've generated a full sentence, send it to TTS right away before the rest of the response is generated.
-                sentences = tts.synthesizer.split_into_sentences(to_speak)
-                if (len(sentences) > 1):
-                    to_speak = sentences[-1]
-                    for sentence in sentences[:-1]:
-                        print (sentence)
-                        wav = tts.tts(sentence.strip())
-                        voice_clips_queue.put(wav)
-            accumulated_output = ''
+        if accumulated_input.strip().endswith(('.', '?', '!')) and not accumulated_input.strip().endswith('...') and len(accumulated_input.strip()) > 3:
+            print (accumulated_input.strip())
+            llm_generator = llm(accumulated_input.strip())
+            accumulated_input = ''
+        #     mlc_llm.stdin.write(accumulated_input.strip().encode() + b'\n')
+        #     mlc_llm.stdin.flush()
+        #     to_speak = ""
+        #     while True:
+        #         read = mlc_llm.stdout.read1().decode()
+        #         to_speak += read.replace("[/INST]:", "")
+        #         if "[INST]:" in read:
+        #             # Done generating text, speak it all.
+        #             to_speak = to_speak.replace("[INST]:", '').strip()
+        #             print (to_speak)
+        #             voice_clips_queue.put(synthesize(to_speak))
+        #             break
+        #         # If we've generated a full sentence, send it to TTS right away before the rest of the response is generated.
+        #         sentences = tts.synthesizer.split_into_sentences(to_speak)
+        #         if (len(sentences) > 1):
+        #             to_speak = sentences[-1]
+        #             for sentence in sentences[:-1]:
+        #                 print (sentence)
+        #                 wav = synthesize(sentence.strip())
+        #                 voice_clips_queue.put(wav)
+        #     accumulated_input = ''
