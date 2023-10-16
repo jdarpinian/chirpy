@@ -1,3 +1,5 @@
+# TODO NEXT!!! figure out why latency is bad after Windows port, maybe whisper_streaming socket communication is slow?
+
 # # part of workaround for torchvision pyinstaller interaction bug from https://github.com/pytorch/vision/issues/1899
 # def script_method(fn, _rcb=None):
 #     return fn
@@ -17,6 +19,9 @@ import os
 import json
 import numpy as np
 import sounddevice as sd
+# sd.default.samplerate = 24000
+# sd.default.channels = 1
+# sd.default.latency = 'low'
 
 try:
     import pyprctl
@@ -42,7 +47,7 @@ if os.name == 'nt':
 # TODO: this is pinging Hugging Face via hf_hub something or other, gotta stop it from doing that. discovered when vpn was on and hf refused to respond
 # OMP: Error #15: Initializing libiomp5md.dll, but found libiomp5md.dll already initialized.
 os.environ['KMP_DUPLICATE_LIB_OK']='True'
-whisper_online_server = subprocess.Popen(["python", "../whisper_streaming/whisper_online_server.py", "--model", "medium.en", "--vad", "--min-chunk-size", "0.4"], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, preexec_fn=preexec_fn)
+whisper_online_server = subprocess.Popen(["python", "../whisper_streaming/whisper_online_server.py", "--model", "medium.en", "--vad", "--min-chunk-size", "0.2"], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, preexec_fn=preexec_fn) # "--vad", 
 
 
 from third_party.styletts2 import synthesize
@@ -63,7 +68,7 @@ from exllama.chat import llm
 # mlc_llm = subprocess.Popen(["../mlc-llm/build/mlc_chat_cli", "--local-id", "Llama-2-13b-chat-hf-q4f16_1"], cwd="../mlc-llm/", stdin=subprocess.PIPE, stdout=subprocess.PIPE, preexec_fn=preexec_fn)
 
 synthesize('Hi.')
-sd.play(np.zeros(0), samplerate=24000)
+# sd.play(np.zeros(0), samplerate=24000)
 print ("tts initialized")
 
 # Wait until whisper_online_server outputs "Listening" to stderr
@@ -81,7 +86,7 @@ import pyaudio
 import queue
 
 def stream_audio_to_server(audio_queue):
-    CHUNK = 4096
+    CHUNK = 1024
     FORMAT = pyaudio.paInt16
     CHANNELS = 1
     RATE = 16000
@@ -104,11 +109,11 @@ def stream_audio_to_server(audio_queue):
         try:
             chunk = s.recv(CHUNK)
             if chunk:
+                chunk = chunk.strip(b'\x00')
                 chunk = chunk.decode()
                 chunk = chunk.strip()
-                # print ("received text from server")
-                # print ("text: " + chunk)
-                audio_queue.put(chunk)
+                if chunk:
+                    audio_queue.put(chunk)
                 chunk = None
         except socket.error:
             pass
@@ -168,7 +173,18 @@ def play_voice_clips():
         voice_clip = voice_clips_queue.get()
         if voice_clip is None:
             break
-        sd.play(voice_clip, samplerate=24000, )
+        silence_threshold = 0.01
+        original_length = len(voice_clip)
+        voice_clip = np.trim_zeros(voice_clip, 'f')
+        while len(voice_clip) > 0 and abs(voice_clip[0]) < silence_threshold:
+            voice_clip = voice_clip[1:]
+        # Remove the start of voice_clip up to the next zero crossing
+        zero_crossings = np.where(np.diff(np.sign(voice_clip)))[0]
+        if len(zero_crossings) > 0:
+            voice_clip = voice_clip[zero_crossings[0]:]
+        final_len = len(voice_clip)
+        # print ("trimmed seconds from start of voice clip: " + str((original_length - final_len) / 24000.))
+        sd.play(voice_clip, samplerate=24000)
         wake_up_event.wait(timeout=len(voice_clip) / 24000.)
         wake_up_event.clear()
         sd.stop()
@@ -211,7 +227,6 @@ while True:
         output = ''.join(c for c in output if c.isprintable())
         output = output.replace('\n', ' ').strip()
         output = ' '.join([i for i in output.split(' ')[2:] if i]).strip()
-        print (output)
     
     next_sentence_to_speak = None
     try:
@@ -225,8 +240,12 @@ while True:
             next_sentence_to_speak = to_speak
             to_speak = ''
     if next_sentence_to_speak:
-        print (next_sentence_to_speak)
+        empty = voice_clips_queue.empty()
+        if empty:
+            print ("speaking: " + next_sentence_to_speak)
         voice_clips_queue.put(synthesize(next_sentence_to_speak.strip(), speed=1.3))
+        if empty:
+            print ("speaking started")
 
     if output is not None:
         accumulated_input += output + ' '
