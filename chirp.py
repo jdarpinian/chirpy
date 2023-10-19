@@ -47,7 +47,7 @@ if os.name == 'nt':
 # TODO: this is pinging Hugging Face via hf_hub something or other, gotta stop it from doing that. discovered when vpn was on and hf refused to respond
 # OMP: Error #15: Initializing libiomp5md.dll, but found libiomp5md.dll already initialized.
 os.environ['KMP_DUPLICATE_LIB_OK']='True'
-whisper_online_server = subprocess.Popen(["python", "../whisper_streaming/whisper_online_server.py", "--model", "medium.en", "--vad", "--min-chunk-size", "0.2"], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, preexec_fn=preexec_fn) # "--vad", 
+whisper_online_server = subprocess.Popen(["python", "../whisper_streaming/whisper_online_server.py", "--model", "medium.en", "--min-chunk-size", "0.1"], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, preexec_fn=preexec_fn) # "--vad", 
 
 
 from third_party.styletts2 import synthesize
@@ -85,7 +85,10 @@ import socket
 import pyaudio
 import queue
 
+audio_start_time = 0
+
 def stream_audio_to_server(audio_queue):
+    global audio_start_time
     CHUNK = 1024
     FORMAT = pyaudio.paInt16
     CHANNELS = 1
@@ -93,18 +96,21 @@ def stream_audio_to_server(audio_queue):
 
     p = pyaudio.PyAudio()
 
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect(('localhost', 43007))
+    s.setblocking(0)
+
     stream = p.open(format=FORMAT,
                     channels=CHANNELS,
                     rate=RATE,
                     input=True,
                     frames_per_buffer=CHUNK)
 
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.connect(('localhost', 43007))
-    s.setblocking(0)
-
     while True:
         data = stream.read(CHUNK)
+        if not audio_start_time:
+            audio_start_time = time.perf_counter()
+
         s.sendall(data)
         try:
             chunk = s.recv(CHUNK)
@@ -185,6 +191,7 @@ def play_voice_clips():
         final_len = len(voice_clip)
         # print ("trimmed seconds from start of voice clip: " + str((original_length - final_len) / 24000.))
         sd.play(voice_clip, samplerate=24000)
+        print ("latency to speaking: " + str(round(time.perf_counter() - last_word_time, 2)))
         wake_up_event.wait(timeout=len(voice_clip) / 24000.)
         wake_up_event.clear()
         sd.stop()
@@ -214,19 +221,27 @@ accumulated_input = ""
 to_speak = ''
 llm_generator = iter(())
 print("entering main loop")
+last_word_time = 0
 while True:
     output = None
     if msvcrt:
         if msvcrt.kbhit():
             output = os.read(sys.stdin.fileno(), 999999).decode().replace('\n', ' ').strip()
+            last_word_time = time.perf_counter()
     elif select.select([sys.stdin,],[],[],0.0)[0]:
         output = os.read(sys.stdin.fileno(), 999999).decode().replace('\n', ' ').strip()
+        last_word_time = time.perf_counter()
     
     if output is None and not audio_queue.empty():
         output = audio_queue.get_nowait()
-        output = ''.join(c for c in output if c.isprintable())
         output = output.replace('\n', ' ').strip()
-        output = ' '.join([i for i in output.split(' ')[2:] if i]).strip()
+        words = output.split(' ')
+        timing = words[:2]
+        last_word_time = audio_start_time + float(timing[1])/1000.
+        latency = time.perf_counter() - last_word_time
+        print ("ASR latency: " + str(round(latency, 2)))
+        words = words[2:]
+        output = ' '.join([i for i in words if i]).strip()
     
     next_sentence_to_speak = None
     try:
@@ -243,9 +258,10 @@ while True:
         empty = voice_clips_queue.empty()
         if empty:
             print ("speaking: " + next_sentence_to_speak)
+        latency = time.perf_counter() - last_word_time
+        if voice_clips_queue.empty():
+            print ("Latency to LLM response: " + str(round(latency, 2)))
         voice_clips_queue.put(synthesize(next_sentence_to_speak.strip(), speed=1.3))
-        if empty:
-            print ("speaking started")
 
     if output is not None:
         accumulated_input += output + ' '
@@ -260,7 +276,8 @@ while True:
             wake_up_event.set()
 
         if accumulated_input.strip().endswith(('.', '?', '!')) and not accumulated_input.strip().endswith('...') and len(accumulated_input.strip()) > 3:
-            print (accumulated_input.strip())
+            latency = time.perf_counter() - last_word_time
+            print ("Latency to LLM init: " + str(round(latency, 2)))
             llm_generator = llm(accumulated_input.strip())
             accumulated_input = ''
         #     mlc_llm.stdin.write(accumulated_input.strip().encode() + b'\n')
