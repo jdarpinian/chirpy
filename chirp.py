@@ -47,7 +47,7 @@ if os.name == 'nt':
 # TODO: this is pinging Hugging Face via hf_hub something or other, gotta stop it from doing that. discovered when vpn was on and hf refused to respond
 # OMP: Error #15: Initializing libiomp5md.dll, but found libiomp5md.dll already initialized.
 os.environ['KMP_DUPLICATE_LIB_OK']='True'
-whisper_online_server = subprocess.Popen(["python", "third_party/whisper_streaming/whisper_online_server.py", "--model", "medium.en", "--min-chunk-size", "0.1"], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, preexec_fn=preexec_fn) # "--vad", 
+whisper_online_server = subprocess.Popen(["python", "third_party/whisper_streaming/whisper_online_server.py", "--model", "large-v2", "--min-chunk-size", "0.2"], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, preexec_fn=preexec_fn) # "--vad", 
 
 
 from third_party.styletts2 import synthesize
