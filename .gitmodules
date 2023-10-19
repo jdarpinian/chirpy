@@ -1,3 +1,6 @@
 [submodule "third_party/StyleTTS2"]
 	path = third_party/StyleTTS2
 	url = git@github.com:jdarpinian/StyleTTS2.git
+[submodule "third_party/whisper_streaming"]
+	path = third_party/whisper_streaming
+	url = git@github.com:jdarpinian/whisper_streaming.git

@@ -1,4 +1,4 @@
-# TODO NEXT!!! figure out why latency is bad after Windows port, maybe whisper_streaming socket communication is slow?
+# TODO NEXT!!! record dataset of voice conversations to optimize whisper_streaming latency and hallucinations, create tools for visualization
 
 # # part of workaround for torchvision pyinstaller interaction bug from https://github.com/pytorch/vision/issues/1899
 # def script_method(fn, _rcb=None):
@@ -47,7 +47,7 @@ if os.name == 'nt':
 # TODO: this is pinging Hugging Face via hf_hub something or other, gotta stop it from doing that. discovered when vpn was on and hf refused to respond
 # OMP: Error #15: Initializing libiomp5md.dll, but found libiomp5md.dll already initialized.
 os.environ['KMP_DUPLICATE_LIB_OK']='True'
-whisper_online_server = subprocess.Popen(["python", "../whisper_streaming/whisper_online_server.py", "--model", "medium.en", "--min-chunk-size", "0.1"], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, preexec_fn=preexec_fn) # "--vad", 
+whisper_online_server = subprocess.Popen(["python", "third_party/whisper_streaming/whisper_online_server.py", "--model", "medium.en", "--min-chunk-size", "0.1"], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, preexec_fn=preexec_fn) # "--vad", 
 
 
 from third_party.styletts2 import synthesize
@@ -75,8 +75,10 @@ print ("tts initialized")
 while True:
     output = whisper_online_server.stderr.readline()
     if output is not None:
-        output = output.decode(encoding='latin-1')
-        # print (output, end='')
+        encoding = 'utf-8'
+        if os.name == 'nt':
+            encoding = 'latin-1'
+        output = output.decode(encoding=encoding)
         if "Listening" in output:
             break
 
@@ -84,8 +86,15 @@ import threading
 import socket
 import pyaudio
 import queue
+import wave
 
 audio_start_time = 0
+import os
+wav_filename = 'audio_output_1.wav'
+counter = 1
+while os.path.isfile(wav_filename):
+    counter += 1
+    wav_filename = f'audio_output_{counter}.wav'
 
 def stream_audio_to_server(audio_queue):
     global audio_start_time
@@ -106,12 +115,19 @@ def stream_audio_to_server(audio_queue):
                     input=True,
                     frames_per_buffer=CHUNK)
 
+    wav_file = wave.open(wav_filename, 'wb')
+    wav_file.setnchannels(CHANNELS)
+    wav_file.setsampwidth(p.get_sample_size(FORMAT))
+    wav_file.setframerate(RATE)
+
     while True:
         data = stream.read(CHUNK)
         if not audio_start_time:
             audio_start_time = time.perf_counter()
 
         s.sendall(data)
+        wav_file.writeframes(data)
+
         try:
             chunk = s.recv(CHUNK)
             if chunk:

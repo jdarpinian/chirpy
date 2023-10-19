@@ -5,8 +5,6 @@
 # 
 
 import os
-os.chdir(os.path.dirname(os.path.abspath(__file__)))
-print(os.getcwd())
 
 # TODO: package espeak with pyinstaller build
 os.environ["PHONEMIZER_ESPEAK_LIBRARY"] = 'C:\\Program Files\\eSpeak NG\\libespeak-ng.dll'
@@ -56,7 +54,7 @@ from nltk.tokenize import word_tokenize
 import sys
 styletts2_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "StyleTTS2/")
 sys.path.append(styletts2_path)
-saved_cwd = os.curdir
+saved_cwd = os.path.realpath(os.getcwd())
 os.chdir(styletts2_path)
 
 from .StyleTTS2.models import *
