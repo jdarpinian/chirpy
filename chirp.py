@@ -298,6 +298,7 @@ if __name__ == '__main__':
 
             if (len(accumulated_input.strip()) > 3 and not voice_clips_queue.empty()):
                 print ("interrupting because you said " + accumulated_input.strip())
+                llm_generator = iter(())
                 # TODO: remove unsaid part of response from context, this is actually really important
                 while not voice_clips_queue.empty():
                     voice_clips_queue.get_nowait()
