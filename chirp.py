@@ -1,5 +1,3 @@
-# TODO NEXT!!! move whisper to own process, performance sucks with GIL too much for same process
-
 def play_voice_clips(voice_clips_queue, wake_up_event):
     import sounddevice as sd
     import numpy as np
@@ -80,6 +78,7 @@ def run_whisper(audio_start_time, segments, ignore_segments_before, segments_loc
             data = stream.read(CHUNK)
             if not audio_start_time.value:
                 audio_start_time.value = time.perf_counter()
+                window_offset = audio_start_time.value
             # wav_file.writeframes(data)
             
             transcription_window = np.append(transcription_window, np.frombuffer(data, dtype=np.int16).astype(np.float32) / 16384.0)
@@ -280,7 +279,6 @@ if __name__ == '__main__':
     last_word_time = 0
     llm_prompt = ''
     while True:
-        time.sleep(0)
         output = None
         # if msvcrt:
         #     if msvcrt.kbhit():
@@ -322,15 +320,21 @@ if __name__ == '__main__':
                 # TODO: normalize the prompt for case/whitespace/punctuation/etc when comparing 
                 if llm_prompt != user_spoke:
                     if llm_prompt:
-                        # TODO NEXT: THIS IS SCREWING UP! causes multiple responses to be jumbled together I think
+                        # TODO: test to see if remove_last_prompt is working
                         # TODO: if a significant part of the response was already spoken, don't remove it from the context
                         print("llm prompt changed, removing last prompt from context")
                         remove_last_prompt()
+                        # pass
                     llm_prompt = user_spoke
                     llm_generator = llm(llm_prompt)
+                    to_speak = ''
                     last_word_time = segments[-1][1]
                     if not voice_clips_queue.empty():
+                        # TODO NEXT: interrupting is not working
                         print ("interrupting because you said " + llm_prompt)
                         while not voice_clips_queue.empty():
                             voice_clips_queue.get_nowait()
+                        wake_up_event.set()
+                        print ("latency to interrupting: " + str(round(time.perf_counter() - last_word_time, 2)))
                     print ("llm prompt: " + llm_prompt)
+                    print ("latency to prompting: " + str(round(time.perf_counter() - last_word_time, 2)))
