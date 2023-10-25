@@ -13,6 +13,7 @@ model = WhisperModel("base.en", device="cuda", compute_type="float16", download_
 
 for length in range(0, len(audio), 1600*1):
     truncated_audio = audio[0:length][-(16000*10):]
+    print( truncated_audio)
     transcription, info = model.transcribe(truncated_audio, language="en", beam_size=5, word_timestamps=False, condition_on_previous_text=False)
 
     # print(info)

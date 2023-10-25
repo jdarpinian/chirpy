@@ -209,6 +209,12 @@ print(f" -- System prompt:")
 print()
 print(col_sysprompt + system_prompt.strip() + col_default)
 
+def remove_last_prompt():
+    global user_prompts, responses_ids
+
+    if len(user_prompts) > 0:
+        user_prompts = user_prompts[:-1]
+        responses_ids = responses_ids[:-1]
 
 def llm(up):
 
