@@ -1,7 +1,17 @@
-def play_voice_clips(voice_clips_queue, wake_up_event):
+import multiprocessing
+
+def die_if_parent_process_dies_on_linux():
+    try:
+        import pyprctl
+        pyprctl.set_pdeathsig(signal.SIGKILL)
+    except ImportError:
+        pass
+
+def play_voice_clips_process(voice_clips_queue, stop_speaking_event, audio_start_time):
+    die_if_parent_process_dies_on_linux()
     import sounddevice as sd
-    import numpy as np
     import time
+    import numpy as np
     while True:
         (voice_clip, last_word_time) = voice_clips_queue.get()
         if voice_clip is None:
@@ -18,183 +28,90 @@ def play_voice_clips(voice_clips_queue, wake_up_event):
         final_len = len(voice_clip)
         # print ("trimmed seconds from start of voice clip: " + str((original_length - final_len) / 24000.))
         sd.play(voice_clip, samplerate=24000)
-        print ("latency to speaking: " + str(round(time.perf_counter() - last_word_time, 2)))
-        wake_up_event.wait(timeout=len(voice_clip) / 24000.)
-        wake_up_event.clear()
+        print ("latency to speaking: " + str(round(time.perf_counter() - audio_start_time.value - last_word_time, 2)))
+        stop_speaking_event.wait(timeout=len(voice_clip) / 24000.)
+        stop_speaking_event.clear()
         sd.stop()
 
-import multiprocessing
-import socket
-import pyaudio
-import queue
-import wave
+def mic_process(audio_start_time, audio_queue):
+    die_if_parent_process_dies_on_linux()
+    import pyaudio
+    import time
+    p = pyaudio.PyAudio()
+    stream = p.open(format=pyaudio.paInt16,
+                    channels=1,
+                    rate=16000,
+                    input=True,
+                    frames_per_buffer=1024)
+    while True:
+        data = stream.read(1024)
+        if not audio_start_time.value:
+            audio_start_time.value = time.perf_counter()
+        audio_queue.put(data)
 
-def run_whisper(audio_start_time, segments, ignore_segments_before, segments_lock):
+def whisper_process(audio_queue, segments, ignore_speech_before, segments_lock):
+    die_if_parent_process_dies_on_linux()
     global whisper_model
     from faster_whisper import WhisperModel
+    import pyaudio
     import librosa
     import os
     import numpy as np
     import time
+    import wave
 
-    import os
-    wav_filename = 'audio_output_1.wav'
-    counter = 1
-    while os.path.isfile(wav_filename):
-        counter += 1
+    for counter in range(1, 2**31):
         wav_filename = f'audio_output_{counter}.wav'
-
-
+        if not os.path.isfile(wav_filename):
+            wav_file = wave.open(wav_filename, 'wb')
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(16000)
+            break
     # TODO: this is pinging Hugging Face via hf_hub something or other, gotta stop it from doing that. discovered when vpn was on and hf refused to respond
     # OMP: Error #15: Initializing libiomp5md.dll, but found libiomp5md.dll already initialized.
     os.environ['KMP_DUPLICATE_LIB_OK']='True'
-
-    CHUNK = 1024
-    FORMAT = pyaudio.paInt16
-    CHANNELS = 1
-    RATE = 16000
-
-    whisper_model = WhisperModel("large-v2", device="cuda", compute_type="float16", download_root=None)
-    print ('loaded whisper model')
-
-
-    p = pyaudio.PyAudio()
-    stream = p.open(format=FORMAT,
-                    channels=CHANNELS,
-                    rate=RATE,
-                    input=True,
-                    frames_per_buffer=CHUNK)
-
-    wav_file = wave.open(wav_filename, 'wb')
-    wav_file.setnchannels(CHANNELS)
-    wav_file.setsampwidth(p.get_sample_size(FORMAT))
-    wav_file.setframerate(RATE)
+    whisper_model = WhisperModel("base.en", device="cuda", compute_type="float16", download_root=None)
 
     transcription_window = np.zeros([0], dtype=np.float32)
     window_offset = 0
     previous_segments = []
     while True:
-        while True:
-            data = stream.read(CHUNK)
-            if not audio_start_time.value:
-                audio_start_time.value = time.perf_counter()
-                window_offset = audio_start_time.value
-            # wav_file.writeframes(data)
+        while not audio_queue.empty():
+            data = audio_queue.get()
+            wav_file.writeframes(data)
             
             transcription_window = np.append(transcription_window, np.frombuffer(data, dtype=np.int16).astype(np.float32) / 16384.0)
-            # print (stream.get_read_available())
-            if stream.get_read_available() < CHUNK:
-                break
-
-        def get_overlapping_segments(new_segment, segments, overlap_threshold=0.1):
-            overlapping_segments = []
-            for i, segment in enumerate(segments):
-                overlap = min(new_segment[1], segment[1]) - max(new_segment[0], segment[0])
-                if overlap > overlap_threshold * (new_segment[1] - new_segment[0]):
-                    overlapping_segments.append(i)
-            return overlapping_segments
 
         transcription_window_length = 20
 
         if len(transcription_window) > 16000*transcription_window_length:
             window_offset += (len(transcription_window) - 16000*transcription_window_length)/16000.
             transcription_window = transcription_window[-16000*transcription_window_length:]
-        if window_offset < ignore_segments_before.value:
-            # increase window_offset to ignore segments before ignore_segments_before
-            transcription_window = transcription_window[int((ignore_segments_before.value - window_offset)*16000):]
-            window_offset = ignore_segments_before.value
+        if window_offset < ignore_speech_before.value:
+            # increase window_offset to ignore segments before ignore_speech_before
+            transcription_window = transcription_window[int((ignore_speech_before.value - window_offset)*16000):]
+            window_offset = ignore_speech_before.value
         # TODO: transcribe is a pretty complex (slow?) function, maybe we can skip some of what it does?
         raw_segments, info = whisper_model.transcribe(transcription_window, language="en", beam_size=5, word_timestamps=False, condition_on_previous_text=False)
         
         with segments_lock:
-            new_segments = []
-            end_of_window = len(transcription_window)/16000.
-            for segment in raw_segments:
-                # print ("got segment: " + segment.text)
-                if segment.no_speech_prob < 0.2:
-                    new_segment = (segment.start + window_offset, segment.end + window_offset, segment.text)
-                    if get_overlapping_segments(new_segment, new_segments):
-                        print ("ERROR OVERLAPPING SEGMENTS IN TRANSCRIPTION")
-                    new_segments.append(new_segment)
-            segments[:] = []
-            segments.extend(new_segments)
-            # segments = list(filter(lambda x: x[1] < window_offset + transcription_window_length/2, list(segments)))
-            # segments.extend(filter(lambda x: x[1] >= window_offset + transcription_window_length/2, new_segments))
-            # segments.sort(key=lambda x: x[0])
-            # print(segments)
-            # Remove segments that overlap by more than 0.2 seconds
-            # i = 0
-            # while i < len(segments) - 1:
-            #     if segments[i+1][0] - segments[i][1] < 0.2:
-            #         segments.pop(i+1)
-            #     else:
-            #         i += 1
-
-            joined_text = ' '.join([segment[2] for segment in list(segments)])
-            # print(joined_text)
-            
-
-            # segments.filter(lambda x: x[1] > window_offset + end_of_window/2)
-            # segments.extend(new_segments)
-            # for segment in new_segments:
-            #     overlapping_segments = get_overlapping_segments(segment, previous_segments)
-            #     for i in overlapping_segments:
-            #         segments.pop(i)
-            #     if not overlapping_segments:
-            #         segments.append(segment)
-            # TODO: also remove segments that should have appeared in the new transcription but didn't
-            # segments.sort(key=lambda x: x[0])
+            segments[:] = [(round(segment.start + window_offset, 2), round(segment.end + window_offset, 2), segment.text)
+                            for segment in raw_segments if segment.no_speech_prob < 0.15]
 
 if __name__ == '__main__':
     multiprocessing.freeze_support()
     multiprocessing.set_start_method('spawn')
 
-    audio_start_time = multiprocessing.Value('d', 0)
-
-    segments = multiprocessing.Manager().list()
-    ignore_segments_before = multiprocessing.Value('d', 0)
-    segments_lock = multiprocessing.Lock()
-
-    whisper_process = multiprocessing.Process(target=run_whisper, args=(audio_start_time, segments, ignore_segments_before, segments_lock), daemon=True)
-    whisper_process.start()
-
-
-    # # part of workaround for torchvision pyinstaller interaction bug from https://github.com/pytorch/vision/issues/1899
-    # def script_method(fn, _rcb=None):
-    #     return fn
-    # def script(obj, optimize=True, _frames_up=0, _rcb=None):
-    #     return obj    
-    # import torch.jit
-    # torch.jit.script_method = script_method 
-    # torch.jit.script = script
-
-    import time
-    from timeit import default_timer as timer
-    import subprocess
-    import signal
-    import select
-    import sys
+    # Kill all child processes when we die on Windows. On Linux the child process must opt in instead, which is handled by die_if_parent_process_dies_on_linux()
+    # TODO figure out macos version of this if we support macos later
     import os
-    import json
-    import numpy as np
-    import sounddevice as sd
-    # sd.default.samplerate = 24000
-    # sd.default.channels = 1
-    # sd.default.latency = 'low'
-
-    try:
-        import pyprctl
-        preexec_fn = lambda : pyprctl.set_pdeathsig(signal.SIGKILL)
-    except ImportError:
-        preexec_fn = None
-
     if os.name == 'nt':
         # This only works on >=Win8, on <=Win7 processes cannot have more than one job object and the shell assigns one to all processes it creates.
         # TODO: do whatever workaround is necessary on Win7 if we care to support it
         # pip install pywin32
         import win32api
         import win32job
-        # hJob will be GC'd when our process exits and this will kill all children created with CreateProcess, hopefully no dependencies create processes in other sneaky ways
         hJob = win32job.CreateJobObject(None, "")
         extended_info = win32job.QueryInformationJobObject(hJob, win32job.JobObjectExtendedLimitInformation)
         extended_info['BasicLimitInformation']['LimitFlags'] = win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
@@ -202,44 +119,29 @@ if __name__ == '__main__':
         win32job.AssignProcessToJobObject(hJob, win32api.GetCurrentProcess())
 
 
+    audio_start_time = multiprocessing.Value('d', 0)
+    audio_queue = multiprocessing.Queue()
+    segments = multiprocessing.Manager().list()
+    ignore_speech_before = multiprocessing.Value('d', 0)
+    segments_lock = multiprocessing.Lock()
+    multiprocessing.Process(target=mic_process, args=(audio_start_time, audio_queue)).start()
+    multiprocessing.Process(target=whisper_process, args=(audio_queue, segments, ignore_speech_before, segments_lock)).start()
+
+    voice_clips_queue = multiprocessing.Queue()
+    stop_speaking_event = multiprocessing.Event()
+    multiprocessing.Process(target=play_voice_clips_process, args=(voice_clips_queue, stop_speaking_event, audio_start_time)).start()
+
+    import time
+    import os
 
     from third_party.styletts2 import synthesize
     from exllama.chat import llm, remove_last_prompt
 
-
-    # from TTS.api import TTS
-    # tts = TTS(model_name='tts_models/en/jenny/jenny', gpu=True,)
-    # print(tts.speakers)
-    # wav = synthesize("This is a test? This is also a test!!", speed=1.2)
-    # sd.play(wav, samplerate=24000)
-    # sd.wait()
-
-    # only works on Linux
-    # arecord = subprocess.Popen(["arecord", "-f", "S16_LE", "-c1", "-r", "16000", "-t", "raw", "-D", "default"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, preexec_fn=preexec_fn)
-    # nc = subprocess.Popen(["nc", "localhost", "43007"], stdin=arecord.stdout, stdout=subprocess.PIPE, preexec_fn=preexec_fn)
-
-    # mlc_llm = subprocess.Popen(["../mlc-llm/build/mlc_chat_cli", "--local-id", "Llama-2-13b-chat-hf-q4f16_1"], cwd="../mlc-llm/", stdin=subprocess.PIPE, stdout=subprocess.PIPE, preexec_fn=preexec_fn)
+    # TODO figure out how to warm up exllama2
+    print ("llm loaded")
 
     synthesize('Hi.')
-    # sd.play(np.zeros(0), samplerate=24000)
     print ("tts initialized")
-
-    # time.sleep(100)
-
-    # Wait until mlc_llm finishes loading
-    # while True:
-    #     output = mlc_llm.stdout.read1()
-    #     if output is not None:
-    #         output = output.decode()
-    #         if "[INST]:" in output:
-    #             break
-    # for token in llm("Hi."):
-    #     print(token, end=' ')
-
-    # print ("llm initialized")
-
-    # TODO figure out how to warm up exllama2
-
 
     # TODO: echo cancellation to filter out our own voice allowing the use of laptop speakers/mic
     # TODO: find a better way of detecting when the user is done speaking, period at end of sentence is not reliable with whisper plus VAD. alternatively fix VAD using whisper itself.
@@ -259,33 +161,17 @@ if __name__ == '__main__':
     # TODO: support multiple langauges at once, for language learning
     # TODO: delete whisper's repeated words after a long pause
 
-    import multiprocessing
-
-    voice_clips_queue = multiprocessing.Queue()
-    wake_up_event = multiprocessing.Event()
-
-    voice_clips_process = multiprocessing.Process(target=play_voice_clips, args=(voice_clips_queue, wake_up_event), daemon=True)
-    voice_clips_process.start()
-
     from nltk.tokenize import sent_tokenize
 
     if os.name == 'nt':
         import msvcrt
 
-    accumulated_input = ""
     to_speak = ''
     llm_generator = None
-    print("entering main loop")
     last_word_time = 0
     llm_prompt = ''
+    print("entering main loop")
     while True:
-        output = None
-        # if msvcrt:
-        #     if msvcrt.kbhit():
-        #         output = os.read(sys.stdin.fileno(), 999999).decode().replace('\n', ' ').strip()
-        #         last_word_time = time.perf_counter()
-        #         segments.append((last_word_time, last_word_time, output))
-        
         next_sentence_to_speak = None
         if llm_generator:
             try:
@@ -302,12 +188,12 @@ if __name__ == '__main__':
                     llm_generator = None
                     with segments_lock:
                         segments[:] = []
-                        ignore_segments_before.value = time.perf_counter()
+                        ignore_speech_before.value = time.perf_counter() - audio_start_time.value
         if next_sentence_to_speak:
             empty = voice_clips_queue.empty()
             if empty:
                 print ("speaking: " + next_sentence_to_speak)
-            latency = time.perf_counter() - last_word_time
+            latency = time.perf_counter() - audio_start_time.value - last_word_time
             if voice_clips_queue.empty():
                 print ("Latency to LLM response: " + str(round(latency, 2)))
             voice_clips_queue.put((synthesize(next_sentence_to_speak.strip(), speed=1.3), last_word_time))
@@ -324,7 +210,6 @@ if __name__ == '__main__':
                         # TODO: if a significant part of the response was already spoken, don't remove it from the context
                         print("llm prompt changed, removing last prompt from context")
                         remove_last_prompt()
-                        # pass
                     llm_prompt = user_spoke
                     llm_generator = llm(llm_prompt)
                     to_speak = ''
@@ -334,7 +219,7 @@ if __name__ == '__main__':
                         print ("interrupting because you said " + llm_prompt)
                         while not voice_clips_queue.empty():
                             voice_clips_queue.get_nowait()
-                        wake_up_event.set()
-                        print ("latency to interrupting: " + str(round(time.perf_counter() - last_word_time, 2)))
+                        stop_speaking_event.set()
+                        print ("latency to interrupting: " + str(round(time.perf_counter() - audio_start_time.value - last_word_time, 2)))
                     print ("llm prompt: " + llm_prompt)
-                    print ("latency to prompting: " + str(round(time.perf_counter() - last_word_time, 2)))
+                    print ("latency to prompting: " + str(round(time.perf_counter() - audio_start_time.value - last_word_time, 2)))
