@@ -52,7 +52,11 @@ from nltk.tokenize import word_tokenize
 
 # wow python's module system is shit, no way to do relative imports that works in any sensible way, so this is how we import things not in our current directory
 import sys
-styletts2_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "StyleTTS2/")
+base_dir = os.path.dirname(os.path.realpath(__file__))
+if getattr(sys, 'frozen', False):
+    # We're running in a PyInstaller bundle
+    base_dir = sys._MEIPASS
+styletts2_path = os.path.join(base_dir, "StyleTTS2/")
 sys.path.append(styletts2_path)
 saved_cwd = os.path.realpath(os.getcwd())
 os.chdir(styletts2_path)

@@ -5,6 +5,7 @@ from exllamav2 import(
     ExLlamaV2,
     ExLlamaV2Config,
     ExLlamaV2Cache,
+    ExLlamaV2Cache_8bit,
     ExLlamaV2Tokenizer,
     model_init,
 )
@@ -30,7 +31,7 @@ parser.add_argument("-nds", "--no_draft_scale", action = "store_true", help = "I
 parser.add_argument("-modes", "--modes", action = "store_true", help = "List available modes and exit.")
 parser.add_argument("-mode", "--mode", choices = prompt_formats_list, help = "Chat mode. Use llama for Llama 1/2 chat finetunes.")
 parser.add_argument("-un", "--username", type = str, default = "User", help = "Username when using raw chat mode")
-parser.add_argument("-bn", "--botname", type = str, default = "Chatbort", help = "Bot name when using raw chat mode")
+parser.add_argument("-bn", "--botname", type = str, default = "Chirp", help = "Bot name when using raw chat mode")
 parser.add_argument("-sp", "--system_prompt", type = str, help = "Use custom system prompt")
 
 parser.add_argument("-temp", "--temperature", type = float, default = 0.95, help = "Sampler temperature, default = 0.95 (1 to disable)")
@@ -42,6 +43,8 @@ parser.add_argument("-maxr", "--max_response_tokens", type = int, default = 1000
 parser.add_argument("-resc", "--response_chunk", type = int, default = 250, help = "Space to reserve in context for reply, default = 250")
 parser.add_argument("-ncf", "--no_code_formatting", action = "store_true", help = "Disable code formatting/syntax highlighting")
 
+parser.add_argument("-c8", "--cache_8bit", action = "store_true", help = "Use 8-bit cache")
+
 parser.add_argument("-pt", "--print_timings", action = "store_true", help = "Output timings after each prompt")
 
 # Arrrgs
@@ -50,7 +53,7 @@ model_init.add_args(parser)
 args = parser.parse_args()
 
 if args.model_dir is None:
-    args.model_dir = "C:\\src\\models\\exllama2\\mistral-7b-openorca-q6"
+    args.model_dir = """C:\src\models\exllama2\OpenHermes-2-Mistral-7B-6.0bpw-h6-exl2"""
     args.mode = "chatml"
 
 
@@ -112,11 +115,21 @@ if args.draft_model_dir:
     draft_model = ExLlamaV2(draft_config)
     draft_model.load()
 
-    draft_cache = ExLlamaV2Cache(draft_model)
+    if args.cache_8bit:
+        draft_cache = ExLlamaV2Cache_8bit(draft_model)
+    else:
+        draft_cache = ExLlamaV2Cache(draft_model)
 
 # Create cache
 
-cache = ExLlamaV2Cache(model)
+# if args.cache_8bit:
+#     cache = ExLlamaV2Cache_8bit(model)
+# else:
+#     cache = ExLlamaV2Cache(model)
+
+# 8 bit cache saves about a gig of memory, trying to fit in 12GB here
+cache = ExLlamaV2Cache_8bit(model)
+
 
 # Chat context
 
