@@ -11,7 +11,10 @@ os.environ["PHONEMIZER_ESPEAK_LIBRARY"] = 'C:\\Program Files\\eSpeak NG\\libespe
 
 # TODO: package this download with pyinstaller build, nltk saves it in C:\Users\jdarp\AppData\Roaming\nltk_data...
 import nltk
-nltk.download('punkt')
+import sys
+running_in_pyinstaller = getattr(sys, 'frozen', False)
+# if not running_in_pyinstaller:
+#     nltk.download('punkt')
 
 # ### Utils
 
@@ -53,8 +56,7 @@ from nltk.tokenize import word_tokenize
 # wow python's module system is shit, no way to do relative imports that works in any sensible way, so this is how we import things not in our current directory
 import sys
 base_dir = os.path.dirname(os.path.realpath(__file__))
-if getattr(sys, 'frozen', False):
-    # We're running in a PyInstaller bundle
+if running_in_pyinstaller:
     base_dir = sys._MEIPASS
 styletts2_path = os.path.join(base_dir, "StyleTTS2/")
 sys.path.append(styletts2_path)
@@ -156,7 +158,7 @@ params = params_whole['net']
 
 for key in model:
     if key in params:
-        print('%s loaded' % key)
+        # print('%s loaded' % key)
         try:
             model[key].load_state_dict(params[key])
         except:

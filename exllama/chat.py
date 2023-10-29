@@ -52,10 +52,16 @@ parser.add_argument("-pt", "--print_timings", action = "store_true", help = "Out
 model_init.add_args(parser)
 args = parser.parse_args()
 
+import sys
+import os
+running_in_pyinstaller = getattr(sys, 'frozen', False)
+
 if args.model_dir is None:
-    args.model_dir = """C:\src\models\exllama2\OpenHermes-2-Mistral-7B-5.0bpw-h6-exl2"""
+    args.model_dir = os.path.join(sys._MEIPASS, "OpenHermes-2-Mistral-7B-5.0bpw-h6-exl2") if running_in_pyinstaller else """C:\src\models\exllama2\OpenHermes-2-Mistral-7B-5.0bpw-h6-exl2"""
     args.mode = "chatml"
 
+# TODO: This causes crashes, debug why
+# args.low_mem = True
 
 # Prompt templates/modes
 
@@ -81,8 +87,8 @@ if system_prompt is None: system_prompt = prompt_format.default_system_prompt()
 # Initialize model and tokenizer
 
 model_init.check_args(args)
-model_init.print_options(args)
-model, tokenizer = model_init.init(args)
+# model_init.print_options(args)
+model, tokenizer = model_init.init(args, quiet = True)
 
 # Initialize draft model if provided
 
@@ -217,10 +223,10 @@ print_timings = args.print_timings
 
 # Main loop
 
-print(f" -- Prompt format: {args.mode}")
-print(f" -- System prompt:")
-print()
-print(col_sysprompt + system_prompt.strip() + col_default)
+# print(f" -- Prompt format: {args.mode}")
+# print(f" -- System prompt:")
+# print()
+# print(col_sysprompt + system_prompt.strip() + col_default)
 
 def remove_last_prompt():
     global user_prompts, responses_ids

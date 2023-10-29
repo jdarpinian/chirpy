@@ -1,12 +1,22 @@
-# TODO: debug why does it sometimes not respond to the first utterance
+# TODO: rename to Chirpy?
 # TODO: why does the first response take longer?
 # TODO: why does it hang and stop responding to ctrl-c sometimes
 # TODO: how can we speed up the voice without artifacts
 # TODO: upgrade to multi speaker model from styletts2 when it is released in a few weeks
+# TODO: figure out why low_mem arg to exllamav2 crashes, it would save about a gig of memory
 
 import multiprocessing
 import signal
 signal.signal(signal.SIGINT, signal.SIG_DFL) # exit instantly on ctrl-c instead of throwing KeyboardInterrupt because it's not reliable, many blocking calls fail to be interrupted by KeyboardInterrupt
+# OMP: Error #15: Initializing libiomp5md.dll, but found libiomp5md.dll already initialized.
+import os
+import sys
+os.environ['KMP_DUPLICATE_LIB_OK']='True'
+os.environ['NLTK_DATA'] = """c:\src\models\\nltk_data"""
+running_in_pyinstaller = getattr(sys, 'frozen', False)
+if running_in_pyinstaller:
+    base_dir = sys._MEIPASS
+    os.environ['NLTK_DATA'] = os.path.join(base_dir, 'nltk_data')
 
 def die_if_parent_process_dies_on_linux():
     try:
@@ -21,7 +31,8 @@ def play_voice_clips_process(voice_clips_queue, stop_speaking_condition, audio_s
     import time
     import numpy as np
     import librosa
-    sd.play(np.zeros([1]), samplerate=24000)
+    sd.play(np.zeros([1024]), samplerate=24000)
+    librosa.effects.trim(np.zeros([1024]), top_db=40)
     print ("sounddevice initialized")
     clip_number = -1
     while True:
@@ -76,10 +87,7 @@ def whisper_process(audio_queue, segments, ignore_speech_before, segments_lock):
             wav_file.setsampwidth(2)
             wav_file.setframerate(16000)
             break
-    # TODO: this is pinging Hugging Face via hf_hub something or other, gotta stop it from doing that. discovered when vpn was on and hf refused to respond
-    # OMP: Error #15: Initializing libiomp5md.dll, but found libiomp5md.dll already initialized.
-    os.environ['KMP_DUPLICATE_LIB_OK']='True'
-    whisper_model = WhisperModel("base.en", device="cuda", compute_type="float16", download_root=None)
+    whisper_model = WhisperModel("base.en", device="cuda", compute_type="float16", local_files_only=True, download_root=sys._MEIPASS if running_in_pyinstaller else """c:\src\models""")
 
     transcription_window = np.zeros([0], dtype=np.float32)
     _ = whisper_model.transcribe(np.zeros([1024], dtype=np.float32), language="en", beam_size=5, word_timestamps=False, condition_on_previous_text=False)
@@ -99,6 +107,8 @@ def whisper_process(audio_queue, segments, ignore_speech_before, segments_lock):
 
         transcription_window_length = 20
 
+        silence_buffer_s = 5 # Whisper doesn't like having a single word right at the beginning of the transcription, so add a little silence before the audio.
+
         if len(transcription_window) > 16000*transcription_window_length:
             window_offset += (len(transcription_window) - 16000*transcription_window_length)/16000.
             transcription_window = transcription_window[-16000*transcription_window_length:]
@@ -107,11 +117,10 @@ def whisper_process(audio_queue, segments, ignore_speech_before, segments_lock):
             transcription_window = transcription_window[int((ignore_speech_before.value - window_offset)*16000):]
             window_offset = ignore_speech_before.value
         # TODO: transcribe is a pretty complex (slow?) function, maybe we can skip some of what it does?
-        raw_segments, info = whisper_model.transcribe(transcription_window, language="en", beam_size=5, word_timestamps=False, condition_on_previous_text=False)
-        
+        raw_segments, info = whisper_model.transcribe(np.concatenate((np.zeros(silence_buffer_s * 16000), transcription_window)), language="en", beam_size=5, word_timestamps=False, condition_on_previous_text=False)
         with segments_lock:
-            segments[:] = [(round(segment.start + window_offset, 2), round(segment.end + window_offset, 2), segment.text)
-                            for segment in raw_segments if segment.no_speech_prob < 0.18]
+            segments[:] = [(round(segment.start + window_offset - silence_buffer_s, 2), round(segment.end + window_offset - silence_buffer_s, 2), segment.text)
+                            for segment in raw_segments if segment.no_speech_prob < 0.2]
 
 if __name__ == '__main__':
     multiprocessing.freeze_support()
@@ -147,6 +156,9 @@ if __name__ == '__main__':
 
     import time
     import os
+    import nltk
+    import warnings
+    warnings.filterwarnings("ignore", category=UserWarning) 
 
     from third_party.styletts2 import synthesize
     from exllama.chat import llm, remove_last_prompt
@@ -171,9 +183,6 @@ if __name__ == '__main__':
     # TODO: add context to LLM prompt using accessibility APIs to read user's screen
     # TODO: support multiple langauges at once, for language learning
 
-    from nltk.tokenize import sent_tokenize
-    import nltk
-
     if os.name == 'nt':
         import msvcrt
 
@@ -191,7 +200,7 @@ if __name__ == '__main__':
         if llm_generator:
             try:
                 to_speak += next(llm_generator)
-                sentences = [sentence for line in to_speak.splitlines() for sentence in sent_tokenize(line)]
+                sentences = [sentence for line in to_speak.splitlines() for sentence in nltk.sent_tokenize(line)]
                 if len(sentences) > 1:
                     next_sentence_to_speak = sentences[0]
                     to_speak = ' '.join(sentences[1:])
@@ -233,7 +242,7 @@ if __name__ == '__main__':
                         print ("user spoke recently, prompting LLM. last word time: " + str(segments[-1][1]) + " time: " + str(time.perf_counter() - audio_start_time.value))
                         if llm_prompt:
                             # TODO: test to see if remove_last_prompt is entirely working 
-                            # TODO: if a significant part of the response was already spoken, don't remove it from the context
+                            # TODO: if a significant part of the response was already spoken, don't remove it from the context. ideally detect how many words have been spoken and only remove the ones that haven't been spoken yet, appending "..." to indicate truncation to the llm
                             print("llm prompt changed, removing last prompt from context")
                             remove_last_prompt()
                         llm_prompt = user_spoke
