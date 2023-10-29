@@ -1,7 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_data_files,collect_submodules,copy_metadata
 
-datas = [('third_party/StyleTTS2', 'StyleTTS2')]
+datas = [('third_party/StyleTTS2', 'StyleTTS2'),
+         ('/src/models/nltk_data', 'nltk_data'),
+         ('/src/models/exllama2/OpenHermes-2-Mistral-7B-5.0bpw-h6-exl2', 'OpenHermes-2-Mistral-7B-5.0bpw-h6-exl2'),
+         ('/src/models/models--guillaumekln--faster-whisper-base.en', 'models--guillaumekln--faster-whisper-base.en')]
 datas += collect_data_files('torchvision', include_py_files=True)
 datas += collect_data_files('torchaudio', include_py_files=True)
 datas += collect_data_files('librosa', include_py_files=True)
@@ -28,6 +31,14 @@ a = Analysis(
     excludes=[],
     noarchive=False,
 )
+
+# Delete .git directories, we don't need them
+to_keep = []
+for (dest, source, kind) in a.datas:
+    if '/.git/' not in dest and '\\.git\\' not in dest:
+        to_keep.append((dest, source, kind))
+a.datas = to_keep
+
 pyz = PYZ(a.pure)
 
 exe = EXE(

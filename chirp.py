@@ -9,30 +9,29 @@ def die_if_parent_process_dies_on_linux():
     except ImportError:
         pass
 
-def play_voice_clips_process(voice_clips_queue, stop_speaking_event, audio_start_time):
+def play_voice_clips_process(voice_clips_queue, stop_speaking_condition, audio_start_time, ignore_voice_clips_before=0):
     die_if_parent_process_dies_on_linux()
     import sounddevice as sd
     import time
     import numpy as np
+    import librosa
+    sd.play(np.zeros([1]), samplerate=24000)
+    print ("sounddevice initialized")
+    clip_number = -1
     while True:
-        (voice_clip, last_word_time) = voice_clips_queue.get()
+        clip_number += 1
+        (voice_clip, last_word_time, text, index) = voice_clips_queue.get()
         if voice_clip is None:
             break
-        silence_threshold = 0.01
-        original_length = len(voice_clip)
-        voice_clip = np.trim_zeros(voice_clip, 'f')
-        while len(voice_clip) > 0 and abs(voice_clip[0]) < silence_threshold:
-            voice_clip = voice_clip[1:]
-        # Remove the start of voice_clip up to the next zero crossing
-        zero_crossings = np.where(np.diff(np.sign(voice_clip)))[0]
-        if len(zero_crossings) > 0:
-            voice_clip = voice_clip[zero_crossings[0]:]
-        final_len = len(voice_clip)
-        # print ("trimmed seconds from start of voice clip: " + str((original_length - final_len) / 24000.))
+        if clip_number < ignore_voice_clips_before.value:
+            continue
+        voice_clip = librosa.effects.trim(voice_clip, top_db=40)[0]
         sd.play(voice_clip, samplerate=24000)
-        print ("latency to speaking: " + str(round(time.perf_counter() - audio_start_time.value - last_word_time, 2)))
-        stop_speaking_event.wait(timeout=len(voice_clip) / 24000.)
-        stop_speaking_event.clear()
+        if last_word_time:
+            print ("latency to speaking: " + str(round(time.perf_counter() - audio_start_time.value - last_word_time, 2)))
+        print (f"speaking {clip_number}: {text}")
+        with stop_speaking_condition:
+            stop_speaking_condition.wait(timeout=len(voice_clip) / 24000.)
         sd.stop()
 
 def mic_process(audio_start_time, audio_queue):
@@ -49,6 +48,7 @@ def mic_process(audio_start_time, audio_queue):
         data = stream.read(1024)
         if not audio_start_time.value:
             audio_start_time.value = time.perf_counter()
+            print("microphone active now")
         audio_queue.put(data)
 
 def whisper_process(audio_queue, segments, ignore_speech_before, segments_lock):
@@ -76,14 +76,20 @@ def whisper_process(audio_queue, segments, ignore_speech_before, segments_lock):
     whisper_model = WhisperModel("base.en", device="cuda", compute_type="float16", download_root=None)
 
     transcription_window = np.zeros([0], dtype=np.float32)
+    _ = whisper_model.transcribe(np.zeros([1024], dtype=np.float32), language="en", beam_size=5, word_timestamps=False, condition_on_previous_text=False)
+    print ("whisper initialized")
+
     window_offset = 0
     previous_segments = []
     while True:
-        while not audio_queue.empty():
-            data = audio_queue.get()
+        data = audio_queue.get()
+        while data:
             wav_file.writeframes(data)
-            
             transcription_window = np.append(transcription_window, np.frombuffer(data, dtype=np.int16).astype(np.float32) / 16384.0)
+            try:
+                data = audio_queue.get_nowait()
+            except multiprocessing.queues.Empty:
+                data = None
 
         transcription_window_length = 20
 
@@ -99,7 +105,7 @@ def whisper_process(audio_queue, segments, ignore_speech_before, segments_lock):
         
         with segments_lock:
             segments[:] = [(round(segment.start + window_offset, 2), round(segment.end + window_offset, 2), segment.text)
-                            for segment in raw_segments if segment.no_speech_prob < 0.15]
+                            for segment in raw_segments if segment.no_speech_prob < 0.18]
 
 if __name__ == '__main__':
     multiprocessing.freeze_support()
@@ -126,12 +132,12 @@ if __name__ == '__main__':
     segments = multiprocessing.Manager().list()
     ignore_speech_before = multiprocessing.Value('d', 0)
     segments_lock = multiprocessing.Lock()
-    multiprocessing.Process(target=mic_process, args=(audio_start_time, audio_queue)).start()
     multiprocessing.Process(target=whisper_process, args=(audio_queue, segments, ignore_speech_before, segments_lock)).start()
 
     voice_clips_queue = multiprocessing.Queue()
-    stop_speaking_event = multiprocessing.Event()
-    multiprocessing.Process(target=play_voice_clips_process, args=(voice_clips_queue, stop_speaking_event, audio_start_time)).start()
+    stop_speaking_condition = multiprocessing.Condition()
+    ignore_voice_clips_before = multiprocessing.Value('d', 0)
+    multiprocessing.Process(target=play_voice_clips_process, args=(voice_clips_queue, stop_speaking_condition, audio_start_time, ignore_voice_clips_before)).start()
 
     import time
     import os
@@ -143,6 +149,7 @@ if __name__ == '__main__':
     print ("llm loaded")
 
     synthesize('Hi.')
+    multiprocessing.Process(target=mic_process, args=(audio_start_time, audio_queue)).start()
     print ("tts initialized")
 
     # TODO: echo cancellation to filter out our own voice allowing the use of laptop speakers/mic
@@ -161,14 +168,19 @@ if __name__ == '__main__':
     # TODO: support multiple langauges at once, for language learning
 
     from nltk.tokenize import sent_tokenize
+    import nltk
 
     if os.name == 'nt':
         import msvcrt
 
     to_speak = ''
     llm_generator = None
+    sentences_spoken = 0
     last_word_time = 0
     llm_prompt = ''
+    normalized_llm_prompt = ''
+    last_debug_print = ''
+    voice_clips_enqueued = 0
     print("entering main loop")
     while True:
         next_sentence_to_speak = None
@@ -189,36 +201,49 @@ if __name__ == '__main__':
                         segments[:] = []
                         ignore_speech_before.value = time.perf_counter() - audio_start_time.value
         if next_sentence_to_speak:
-            empty = voice_clips_queue.empty()
-            if empty:
-                print ("speaking: " + next_sentence_to_speak)
+            sentences_spoken += 1
+            # print ("speaking: " + next_sentence_to_speak)
             latency = time.perf_counter() - audio_start_time.value - last_word_time
-            if voice_clips_queue.empty():
+            response_interval_start = 0
+            if sentences_spoken == 1:
                 print ("Latency to LLM response: " + str(round(latency, 2)))
-            voice_clips_queue.put((synthesize(next_sentence_to_speak.strip(), speed=1.3), last_word_time))
+                response_interval_start = last_word_time
+            voice_clips_queue.put((synthesize(next_sentence_to_speak.strip(), speed=1), response_interval_start, next_sentence_to_speak.strip(), voice_clips_enqueued))
+            voice_clips_enqueued += 1
 
         with segments_lock:
             # TODO: if a segment disappears this doesn't stop the llm from speaking, it probably should
             if segments:
-                print ("got segments: " + str(segments))
-                user_spoke = ' '.join([seg[2] for seg in segments])
-                # TODO: normalize the prompt for case/whitespace/punctuation/etc when comparing 
-                if llm_prompt != user_spoke:
-                    if llm_prompt:
-                        # TODO: test to see if remove_last_prompt is working
-                        # TODO: if a significant part of the response was already spoken, don't remove it from the context
-                        print("llm prompt changed, removing last prompt from context")
-                        remove_last_prompt()
-                    llm_prompt = user_spoke
-                    llm_generator = llm(llm_prompt)
-                    to_speak = ''
-                    last_word_time = segments[-1][1]
-                    if not voice_clips_queue.empty():
-                        # TODO NEXT: interrupting is not working
-                        print ("interrupting because you said " + llm_prompt)
-                        while not voice_clips_queue.empty():
-                            voice_clips_queue.get_nowait()
-                        stop_speaking_event.set()
-                        print ("latency to interrupting: " + str(round(time.perf_counter() - audio_start_time.value - last_word_time, 2)))
-                    print ("llm prompt: " + llm_prompt)
-                    print ("latency to prompting: " + str(round(time.perf_counter() - audio_start_time.value - last_word_time, 2)))
+                user_spoke = ' '.join([seg[2].strip() for seg in segments])
+                def normalize(str):
+                    return ' '.join(nltk.word_tokenize(str.lower()))
+                normalized_user_spoke = normalize(user_spoke)
+                # If the prompt changed after normalization, and the user actually spoke recently (so this isn't just a delayed response to something they said a while ago), then prompt the LLM
+                if normalized_llm_prompt != normalized_user_spoke and segments:
+                    print ("user spoke: " + str(user_spoke))
+                    speech_end_time = segments[-1][1]
+                    current_time = time.perf_counter() - audio_start_time.value
+                    if speech_end_time > current_time + 0.2:
+                        print ("future speech, ignoring. last word time: " + str(segments[-1][1]) + " time: " + str(time.perf_counter() - audio_start_time.value))
+                    elif segments[-1][1] > time.perf_counter() - audio_start_time.value - 2:
+                        print ("user spoke recently, prompting LLM. last word time: " + str(segments[-1][1]) + " time: " + str(time.perf_counter() - audio_start_time.value))
+                        if llm_prompt:
+                            # TODO: test to see if remove_last_prompt is entirely working 
+                            # TODO: if a significant part of the response was already spoken, don't remove it from the context
+                            print("llm prompt changed, removing last prompt from context")
+                            remove_last_prompt()
+                        llm_prompt = user_spoke
+                        normalized_llm_prompt = normalized_user_spoke
+                        llm_generator = llm(llm_prompt)
+                        to_speak = ''
+                        last_word_time = segments[-1][1]
+                        sentences_spoken = 0
+                        if not voice_clips_queue.empty():
+                            print (f"interrupting voice clips before {voice_clips_enqueued} because you said " + llm_prompt)
+                            ignore_voice_clips_before.value = voice_clips_enqueued
+                            with stop_speaking_condition:
+                                stop_speaking_condition.notify()
+                            print ("latency to interrupting: " + str(round(time.perf_counter() - audio_start_time.value - last_word_time, 2)))
+                        print ("latency to prompting: " + str(round(time.perf_counter() - audio_start_time.value - last_word_time, 2)))
+                    else:
+                        print ("user spoke a while ago, ignoring. last word time: " + str(segments[-1][1]) + " time: " + str(time.perf_counter() - audio_start_time.value))

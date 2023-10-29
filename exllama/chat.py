@@ -53,7 +53,7 @@ model_init.add_args(parser)
 args = parser.parse_args()
 
 if args.model_dir is None:
-    args.model_dir = """C:\src\models\exllama2\OpenHermes-2-Mistral-7B-6.0bpw-h6-exl2"""
+    args.model_dir = """C:\src\models\exllama2\OpenHermes-2-Mistral-7B-5.0bpw-h6-exl2"""
     args.mode = "chatml"
 
 
