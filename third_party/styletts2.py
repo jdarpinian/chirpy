@@ -6,10 +6,6 @@
 
 import os
 
-# TODO: package espeak with pyinstaller build
-os.environ["PHONEMIZER_ESPEAK_LIBRARY"] = 'C:\\Program Files\\eSpeak NG\\libespeak-ng.dll'
-
-# TODO: package this download with pyinstaller build, nltk saves it in C:\Users\jdarp\AppData\Roaming\nltk_data...
 import nltk
 import sys
 running_in_pyinstaller = getattr(sys, 'frozen', False)

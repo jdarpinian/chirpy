@@ -1,3 +1,5 @@
+# This is the golden command to copy a build to the test machine fast:
+# rclone sync -P --fast-list --size-only C:\src\chirp\dist\chirp \\old-titan\Users\jdarp\Desktop\chirp
 # TODO: rename to Chirpy?
 # TODO: why does the first response take longer?
 # TODO: why does it hang and stop responding to ctrl-c sometimes
@@ -8,15 +10,13 @@
 import multiprocessing
 import signal
 signal.signal(signal.SIGINT, signal.SIG_DFL) # exit instantly on ctrl-c instead of throwing KeyboardInterrupt because it's not reliable, many blocking calls fail to be interrupted by KeyboardInterrupt
-# OMP: Error #15: Initializing libiomp5md.dll, but found libiomp5md.dll already initialized.
 import os
 import sys
-os.environ['KMP_DUPLICATE_LIB_OK']='True'
-os.environ['NLTK_DATA'] = """c:\src\models\\nltk_data"""
 running_in_pyinstaller = getattr(sys, 'frozen', False)
-if running_in_pyinstaller:
-    base_dir = sys._MEIPASS
-    os.environ['NLTK_DATA'] = os.path.join(base_dir, 'nltk_data')
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'True' # suppresses: OMP: Error #15: Initializing libiomp5md.dll, but found libiomp5md.dll already initialized.
+os.environ['NLTK_DATA'] = os.path.join(sys._MEIPASS, 'nltk_data') if running_in_pyinstaller else "/src/models/nltk_data"
+os.environ["PHONEMIZER_ESPEAK_LIBRARY"] = os.path.join(sys._MEIPASS, 'eSpeak/libespeak-ng.dll') if running_in_pyinstaller else "/src/models/eSpeak/libespeak-ng.dll"
+os.environ["ESPEAK_DATA_PATH"] = os.path.join(sys._MEIPASS, 'eSpeak/espeak-ng-data') if running_in_pyinstaller else "/src/models/eSpeak/espeak-ng-data"
 
 def die_if_parent_process_dies_on_linux():
     try:
@@ -33,7 +33,7 @@ def play_voice_clips_process(voice_clips_queue, stop_speaking_condition, audio_s
     import librosa
     sd.play(np.zeros([1024]), samplerate=24000)
     librosa.effects.trim(np.zeros([1024]), top_db=40)
-    print ("sounddevice initialized")
+    print ("Audio output initialized")
     clip_number = -1
     while True:
         clip_number += 1
@@ -46,7 +46,7 @@ def play_voice_clips_process(voice_clips_queue, stop_speaking_condition, audio_s
         sd.play(voice_clip, samplerate=24000)
         if last_word_time:
             print ("latency to speaking: " + str(round(time.perf_counter() - audio_start_time.value - last_word_time, 2)))
-        print (f"speaking {clip_number}: {text}")
+        print (f"speaking {clip_number}: {text.strip()}")
         with stop_speaking_condition:
             stop_speaking_condition.wait(timeout=len(voice_clip) / 24000.)
         sd.stop()
@@ -65,7 +65,10 @@ def mic_process(audio_start_time, audio_queue):
         data = stream.read(1024)
         if not audio_start_time.value:
             audio_start_time.value = time.perf_counter()
-            print("microphone active now")
+            print(" ______________________________________ ")
+            print("|                                      |")
+            print("| Microphone open. Start speaking now! |")
+            print("|______________________________________|")
         audio_queue.put(data)
 
 def whisper_process(audio_queue, segments, ignore_speech_before, segments_lock):
@@ -91,7 +94,7 @@ def whisper_process(audio_queue, segments, ignore_speech_before, segments_lock):
 
     transcription_window = np.zeros([0], dtype=np.float32)
     _ = whisper_model.transcribe(np.zeros([1024], dtype=np.float32), language="en", beam_size=5, word_timestamps=False, condition_on_previous_text=False)
-    print ("whisper initialized")
+    print ("Voice recognition loaded")
 
     window_offset = 0
     previous_segments = []
@@ -120,7 +123,7 @@ def whisper_process(audio_queue, segments, ignore_speech_before, segments_lock):
         raw_segments, info = whisper_model.transcribe(np.concatenate((np.zeros(silence_buffer_s * 16000), transcription_window)), language="en", beam_size=5, word_timestamps=False, condition_on_previous_text=False)
         with segments_lock:
             segments[:] = [(round(segment.start + window_offset - silence_buffer_s, 2), round(segment.end + window_offset - silence_buffer_s, 2), segment.text)
-                            for segment in raw_segments if segment.no_speech_prob < 0.2]
+                            for segment in raw_segments if segment.no_speech_prob < 0.3]
 
 if __name__ == '__main__':
     multiprocessing.freeze_support()
@@ -161,13 +164,17 @@ if __name__ == '__main__':
     warnings.filterwarnings("ignore", category=UserWarning) 
 
     from third_party.styletts2 import synthesize
-    from exllama.chat import llm, remove_last_prompt
+    try:
+        from exllama.chat import llm, remove_last_prompt
+    except RuntimeError:
+        print ("Failed to load pytorch CUDA. Nvidia GPU required. Try upgrading your Nvidia drivers.")
+        exit(1)
 
     # TODO figure out how to warm up exllama2
     print ("llm loaded")
 
-    synthesize('Hi.')
     multiprocessing.Process(target=mic_process, args=(audio_start_time, audio_queue)).start()
+    synthesize('Hi.')
     print ("tts initialized")
 
     # TODO: echo cancellation to filter out our own voice allowing the use of laptop speakers/mic
@@ -194,7 +201,7 @@ if __name__ == '__main__':
     normalized_llm_prompt = ''
     last_debug_print = ''
     voice_clips_enqueued = 0
-    print("entering main loop")
+
     while True:
         next_sentence_to_speak = None
         if llm_generator:
@@ -254,9 +261,9 @@ if __name__ == '__main__':
                         if not voice_clips_queue.empty():
                             print (f"interrupting voice clips before {voice_clips_enqueued} because you said " + llm_prompt)
                             ignore_voice_clips_before.value = voice_clips_enqueued
-                            with stop_speaking_condition:
-                                stop_speaking_condition.notify()
                             print ("latency to interrupting: " + str(round(time.perf_counter() - audio_start_time.value - last_word_time, 2)))
+                        with stop_speaking_condition:
+                            stop_speaking_condition.notify_all()
                         print ("latency to prompting: " + str(round(time.perf_counter() - audio_start_time.value - last_word_time, 2)))
                     else:
                         print ("user spoke a while ago, ignoring. last word time: " + str(segments[-1][1]) + " time: " + str(time.perf_counter() - audio_start_time.value))

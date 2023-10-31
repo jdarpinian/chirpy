@@ -4,12 +4,16 @@ from PyInstaller.utils.hooks import collect_data_files,collect_submodules,copy_m
 datas = [('third_party/StyleTTS2', 'StyleTTS2'),
          ('/src/models/nltk_data', 'nltk_data'),
          ('/src/models/exllama2/OpenHermes-2-Mistral-7B-5.0bpw-h6-exl2', 'OpenHermes-2-Mistral-7B-5.0bpw-h6-exl2'),
-         ('/src/models/models--guillaumekln--faster-whisper-base.en', 'models--guillaumekln--faster-whisper-base.en')]
+         ('/src/models/models--guillaumekln--faster-whisper-base.en', 'models--guillaumekln--faster-whisper-base.en'),
+         ('/src/models/eSpeak', 'eSpeak'),
+         ('/src/models/dlls', '.')]
 datas += collect_data_files('torchvision', include_py_files=True)
 datas += collect_data_files('torchaudio', include_py_files=True)
 datas += collect_data_files('librosa', include_py_files=True)
 datas += collect_data_files('einops_exts', include_py_files=True)
 datas += collect_data_files('language_tags', include_py_files=True)
+datas += collect_data_files('cuda-python', include_py_files=True)
+datas += collect_data_files('cuda-nvrtc-dev', include_py_files=True)
 # recursive is overkill, probably only a couple of dependencies need this, but who cares really
 datas += copy_metadata('transformers', recursive=True)
 
@@ -18,6 +22,8 @@ hiddenimports = []
 hiddenimports += collect_submodules('pyaudio')
 hiddenimports += collect_submodules('faster_whisper')
 hiddenimports += collect_submodules('torchaudio.lib.libtorchaudio')
+hiddenimports += collect_submodules('cuda-python')
+hiddenimports += collect_submodules('cuda-nvrtc-dev')
 
 a = Analysis(
     ['chirp.py'],
