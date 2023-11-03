@@ -4,3 +4,10 @@ __pycache__
 /build
 /dist
 /audio_output_*.wav
+/msix/**/x64/
+/msix/**/bin/
+/msix/**/obj/
+/msix/**/BundleArtifacts/
+/msix/**/AppPackages/
+/msix/**/*.user
+/msix/**/.vs/

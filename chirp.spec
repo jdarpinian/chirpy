@@ -6,7 +6,7 @@ datas = [('third_party/StyleTTS2', 'StyleTTS2'),
          ('/src/models/exllama2/OpenHermes-2-Mistral-7B-5.0bpw-h6-exl2', 'OpenHermes-2-Mistral-7B-5.0bpw-h6-exl2'),
          ('/src/models/models--guillaumekln--faster-whisper-base.en', 'models--guillaumekln--faster-whisper-base.en'),
          ('/src/models/eSpeak', 'eSpeak'),
-         ('/src/models/dlls', '.')]
+         ('/src/models/dlls', '.'),]
 datas += collect_data_files('torchvision', include_py_files=True)
 datas += collect_data_files('torchaudio', include_py_files=True)
 datas += collect_data_files('librosa', include_py_files=True)
@@ -64,6 +64,15 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     contents_directory='chirp_data',
+    manifest="""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0" xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
+  <asmv3:application>
+    <asmv3:windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+    </asmv3:windowsSettings>
+  </asmv3:application>
+</assembly>""",
 )
 coll = COLLECT(
     exe,

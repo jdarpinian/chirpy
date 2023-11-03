@@ -18,6 +18,11 @@ os.environ['NLTK_DATA'] = os.path.join(sys._MEIPASS, 'nltk_data') if running_in_
 os.environ["PHONEMIZER_ESPEAK_LIBRARY"] = os.path.join(sys._MEIPASS, 'eSpeak/libespeak-ng.dll') if running_in_pyinstaller else "/src/models/eSpeak/libespeak-ng.dll"
 os.environ["ESPEAK_DATA_PATH"] = os.path.join(sys._MEIPASS, 'eSpeak/espeak-ng-data') if running_in_pyinstaller else "/src/models/eSpeak/espeak-ng-data"
 
+# Fix unable to load cublas64_11.dll error on windows
+if not running_in_pyinstaller:
+    # os.add_dll_directory('C:\\src\\models\\dlls\\') # this actually does not work, sigh
+    sys.path.append('C:\\src\\models\\dlls\\') # this actually works
+
 def die_if_parent_process_dies_on_linux():
     try:
         import pyprctl
@@ -69,6 +74,7 @@ def mic_process(audio_start_time, audio_queue):
             print("|                                      |")
             print("| Microphone open. Start speaking now! |")
             print("|______________________________________|")
+            print("")
         audio_queue.put(data)
 
 def whisper_process(audio_queue, segments, ignore_speech_before, segments_lock):
@@ -82,14 +88,15 @@ def whisper_process(audio_queue, segments, ignore_speech_before, segments_lock):
     import time
     import wave
 
-    for counter in range(1, 2**31):
-        wav_filename = f'audio_output_{counter}.wav'
-        if not os.path.isfile(wav_filename):
-            wav_file = wave.open(wav_filename, 'wb')
-            wav_file.setnchannels(1)
-            wav_file.setsampwidth(2)
-            wav_file.setframerate(16000)
-            break
+    wav_file = None
+    # for counter in range(1, 2**31):
+    #     wav_filename = f'audio_output_{counter}.wav'
+    #     if not os.path.isfile(wav_filename):
+    #         wav_file = wave.open(wav_filename, 'wb')
+    #         wav_file.setnchannels(1)
+    #         wav_file.setsampwidth(2)
+    #         wav_file.setframerate(16000)
+    #         break
     whisper_model = WhisperModel("base.en", device="cuda", compute_type="float16", local_files_only=True, download_root=sys._MEIPASS if running_in_pyinstaller else """c:\src\models""")
 
     transcription_window = np.zeros([0], dtype=np.float32)
@@ -101,7 +108,7 @@ def whisper_process(audio_queue, segments, ignore_speech_before, segments_lock):
     while True:
         data = audio_queue.get()
         while data:
-            wav_file.writeframes(data)
+            if wav_file: wav_file.writeframes(data)
             transcription_window = np.append(transcription_window, np.frombuffer(data, dtype=np.int16).astype(np.float32) / 16384.0)
             try:
                 data = audio_queue.get_nowait()
@@ -143,7 +150,8 @@ if __name__ == '__main__':
         extended_info['BasicLimitInformation']['LimitFlags'] = win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
         win32job.SetInformationJobObject(hJob, win32job.JobObjectExtendedLimitInformation, extended_info)
         win32job.AssignProcessToJobObject(hJob, win32api.GetCurrentProcess())
-
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
 
     audio_start_time = multiprocessing.Value('d', 0)
     audio_queue = multiprocessing.Queue()
@@ -173,9 +181,9 @@ if __name__ == '__main__':
     # TODO figure out how to warm up exllama2
     print ("llm loaded")
 
-    multiprocessing.Process(target=mic_process, args=(audio_start_time, audio_queue)).start()
     synthesize('Hi.')
     print ("tts initialized")
+    multiprocessing.Process(target=mic_process, args=(audio_start_time, audio_queue)).start()
 
     # TODO: echo cancellation to filter out our own voice allowing the use of laptop speakers/mic
     # TODO: call out to GPT-4
