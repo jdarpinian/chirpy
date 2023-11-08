@@ -1,0 +1,20 @@
+{
+  "name": "chirpy",
+  "version": "1.0.0",
+  "description": "Chirpy Personal AI",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "electron ."
+  },
+  "repository": {
+    "type": "git",
+    "url": ".."
+  },
+  "author": "James Darpinian",
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "electron": "^28.0.0-beta.2"
+  },
+  "type": "module"
+}

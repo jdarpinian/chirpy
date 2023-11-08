@@ -3,7 +3,7 @@ __pycache__
 /venv
 /build
 /dist
-/audio_output_*.wav
+/audio_output
 /msix/**/x64/
 /msix/**/bin/
 /msix/**/obj/
@@ -11,3 +11,4 @@ __pycache__
 /msix/**/AppPackages/
 /msix/**/*.user
 /msix/**/.vs/
+**/node_modules/
