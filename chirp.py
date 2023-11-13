@@ -47,13 +47,13 @@ def play_voice_clips_process(voice_clips_queue, stop_speaking_condition, audio_s
             break
         if clip_number < ignore_voice_clips_before.value:
             continue
-        voice_clip = librosa.effects.trim(voice_clip, top_db=40)[0]
+        voice_clip = librosa.effects.trim(voice_clip, top_db=20)[0]
         sd.play(voice_clip, samplerate=24000)
         if last_word_time:
             print ("latency to speaking: " + str(round(time.perf_counter() - audio_start_time.value - last_word_time, 2)))
         print (f"speaking {clip_number}: {text.strip()}")
         with stop_speaking_condition:
-            stop_speaking_condition.wait(timeout=len(voice_clip) / 24000.)
+            stop_speaking_condition.wait(timeout=len(voice_clip) / 24000. + 0.5)
         sd.stop()
 
 def mic_process(audio_start_time, audio_queue):
@@ -66,8 +66,11 @@ def mic_process(audio_start_time, audio_queue):
                     rate=16000,
                     input=True,
                     frames_per_buffer=1024)
+    i = 0
     while True:
         data = stream.read(1024)
+        i += 1024
+        # print(f"{stream.get_time()} {time.perf_counter()} {audio_start_time.value + i/16000.}")
         if not audio_start_time.value:
             audio_start_time.value = time.perf_counter()
             print(" ______________________________________ ")
@@ -75,7 +78,7 @@ def mic_process(audio_start_time, audio_queue):
             print("| Microphone open. Start speaking now! |")
             print("|______________________________________|")
             print("")
-        audio_queue.put(data)
+        audio_queue.put((data, stream.get_time() - audio_start_time.value))
 
 def whisper_process(audio_queue, segments, ignore_speech_before, segments_lock):
     die_if_parent_process_dies_on_linux()
@@ -97,27 +100,28 @@ def whisper_process(audio_queue, segments, ignore_speech_before, segments_lock):
     #         wav_file.setsampwidth(2)
     #         wav_file.setframerate(16000)
     #         break
-    whisper_model = WhisperModel("base.en", device="cuda", compute_type="float16", local_files_only=True, download_root=sys._MEIPASS if running_in_pyinstaller else """c:\src\models""")
+    whisper_model = WhisperModel("large-v2", device="cuda", compute_type="float16", download_root=sys._MEIPASS if running_in_pyinstaller else """c:\src\models""")
 
     transcription_window = np.zeros([0], dtype=np.float32)
-    _ = whisper_model.transcribe(np.zeros([1024], dtype=np.float32), language="en", beam_size=5, word_timestamps=False, condition_on_previous_text=False)
+    raw_segments, info = whisper_model.transcribe(np.ones([16000*5], dtype=np.float32), language="en", beam_size=5, word_timestamps=False, condition_on_previous_text=False)
+    [segment for segment in raw_segments] # iterate over the generator to force it to load the model
     print ("Voice recognition loaded")
 
     window_offset = 0
     previous_segments = []
     while True:
-        data = audio_queue.get()
+        (data, data_time) = audio_queue.get()
         while data:
             if wav_file: wav_file.writeframes(data)
             transcription_window = np.append(transcription_window, np.frombuffer(data, dtype=np.int16).astype(np.float32) / 16384.0)
             try:
-                data = audio_queue.get_nowait()
+                (data, data_time) = audio_queue.get_nowait()
             except multiprocessing.queues.Empty:
                 data = None
 
         transcription_window_length = 20
 
-        silence_buffer_s = 5 # Whisper doesn't like having a single word right at the beginning of the transcription, so add a little silence before the audio.
+        silence_buffer_s = 1 # Whisper doesn't like having a single word right at the beginning of the transcription, so add a little silence before the audio.
 
         if len(transcription_window) > 16000*transcription_window_length:
             window_offset += (len(transcription_window) - 16000*transcription_window_length)/16000.
@@ -126,11 +130,14 @@ def whisper_process(audio_queue, segments, ignore_speech_before, segments_lock):
             # increase window_offset to ignore segments before ignore_speech_before
             transcription_window = transcription_window[int((ignore_speech_before.value - window_offset)*16000):]
             window_offset = ignore_speech_before.value
+        start_of_window = data_time - len(transcription_window)/16000.
         # TODO: transcribe is a pretty complex (slow?) function, maybe we can skip some of what it does?
         raw_segments, info = whisper_model.transcribe(np.concatenate((np.zeros(silence_buffer_s * 16000), transcription_window)), language="en", beam_size=5, word_timestamps=False, condition_on_previous_text=False)
+        raw_segments = [segment for segment in raw_segments]
+        # print (raw_segments)
         with segments_lock:
-            segments[:] = [(round(segment.start + window_offset - silence_buffer_s, 2), round(segment.end + window_offset - silence_buffer_s, 2), segment.text)
-                            for segment in raw_segments if segment.no_speech_prob < 0.3]
+            segments[:] = [(round(start_of_window + segment.start - silence_buffer_s, 2), round(segment.end + start_of_window - silence_buffer_s, 2), segment.text)
+                            for segment in raw_segments if segment.no_speech_prob < 0.35]
 
 if __name__ == '__main__':
     multiprocessing.freeze_support()
@@ -152,6 +159,8 @@ if __name__ == '__main__':
         win32job.AssignProcessToJobObject(hJob, win32api.GetCurrentProcess())
         import ctypes
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
+
+    print ("Loading...")
 
     audio_start_time = multiprocessing.Value('d', 0)
     audio_queue = multiprocessing.Queue()
@@ -252,9 +261,9 @@ if __name__ == '__main__':
                     speech_end_time = segments[-1][1]
                     current_time = time.perf_counter() - audio_start_time.value
                     if speech_end_time > current_time + 0.2:
-                        print ("future speech, ignoring. last word time: " + str(segments[-1][1]) + " time: " + str(time.perf_counter() - audio_start_time.value))
+                        pass # print ("future speech, ignoring. last word time: " + str(segments[-1][1]) + " time: " + str(time.perf_counter() - audio_start_time.value))
                     elif segments[-1][1] > time.perf_counter() - audio_start_time.value - 2:
-                        print ("user spoke recently, prompting LLM. last word time: " + str(segments[-1][1]) + " time: " + str(time.perf_counter() - audio_start_time.value))
+                        # print ("user spoke recently, prompting LLM. last word time: " + str(segments[-1][1]) + " time: " + str(time.perf_counter() - audio_start_time.value))
                         if llm_prompt:
                             # TODO: test to see if remove_last_prompt is entirely working 
                             # TODO: if a significant part of the response was already spoken, don't remove it from the context. ideally detect how many words have been spoken and only remove the ones that haven't been spoken yet, appending "..." to indicate truncation to the llm
@@ -270,8 +279,11 @@ if __name__ == '__main__':
                             print (f"interrupting voice clips before {voice_clips_enqueued} because you said " + llm_prompt)
                             ignore_voice_clips_before.value = voice_clips_enqueued
                             print ("latency to interrupting: " + str(round(time.perf_counter() - audio_start_time.value - last_word_time, 2)))
+                        ignore_voice_clips_before.value = voice_clips_enqueued
                         with stop_speaking_condition:
-                            stop_speaking_condition.notify_all()
+                            stop_speaking_condition.notify()
+                        with stop_speaking_condition:
+                            stop_speaking_condition.notify()
                         print ("latency to prompting: " + str(round(time.perf_counter() - audio_start_time.value - last_word_time, 2)))
-                    else:
-                        print ("user spoke a while ago, ignoring. last word time: " + str(segments[-1][1]) + " time: " + str(time.perf_counter() - audio_start_time.value))
+                    # else:
+                    #     print ("user spoke a while ago, ignoring. last word time: " + str(segments[-1][1]) + " time: " + str(time.perf_counter() - audio_start_time.value))
