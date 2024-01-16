@@ -30,31 +30,81 @@ def die_if_parent_process_dies_on_linux():
     except ImportError:
         pass
 
-def play_voice_clips_process(voice_clips_queue, stop_speaking_condition, audio_start_time, ignore_voice_clips_before=0):
+def play_voice_clips_process(voice_clips_queue, audio_start_time, skip_responses_before, last_response_spoken):
     die_if_parent_process_dies_on_linux()
     import sounddevice as sd
     import time
     import numpy as np
     import librosa
-    sd.play(np.zeros([1024]), samplerate=24000)
+    stream = sd.OutputStream(samplerate=24000, channels=1)
+    stream.start()
     librosa.effects.trim(np.zeros([1024]), top_db=40)
     print ("Audio output initialized")
-    clip_number = -1
+    last_response_index = -1
     while True:
-        clip_number += 1
-        (voice_clip, last_word_time, text, index) = voice_clips_queue.get()
+        (voice_clip, text, last_word_time, index) = voice_clips_queue.get()
         if voice_clip is None:
             break
-        if clip_number < ignore_voice_clips_before.value:
+        if index < skip_responses_before.value:
             continue
-        voice_clip = librosa.effects.trim(voice_clip, top_db=20)[0]
-        sd.play(voice_clip, samplerate=24000)
-        if last_word_time:
-            print ("latency to speaking: " + str(round(time.perf_counter() - audio_start_time.value - last_word_time, 2)))
-        print (f"speaking {clip_number}: {text.strip()}")
-        with stop_speaking_condition:
-            stop_speaking_condition.wait(timeout=len(voice_clip) / 24000. + 0.5)
-        sd.stop()
+        # voice_clip = librosa.effects.trim(voice_clip, top_db=20)[0]
+        stream.write(voice_clip)
+        last_response_spoken.value = index
+        if last_word_time and last_response_index != index:
+            print (f"latency to speaking response number {index}: {round(time.perf_counter() - audio_start_time.value - last_word_time, 2)}")
+            last_response_index = index
+    stream.stop()
+    stream.close()
+
+def tts_process(tts_queue, voice_clips_queue, skip_responses_before, generating_response_number, tts_ready):
+    die_if_parent_process_dies_on_linux()
+    import time
+    from TTS.api import TTS
+    tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cuda")
+    import numpy as np
+    import torch
+    best_xtts_speakers = [
+        'Tammy Grit',
+        'Royston Min',
+        'Craig Gutsy',
+        'Gilberto Mathias',
+        'Barbora MacLean',
+        'Wulf Carlevaro',
+        'Kumar Dahl',
+        'Luis Moray',
+        ]
+    def synthesize(text, language="en", speaker='Barbora MacLean', speed=1):
+        print(f"Synthesizing: {text}")
+        gpt_cond_latent, speaker_embedding = tts.synthesizer.tts_model.speaker_manager.speakers[speaker].values()
+        gpt_cond_latent = gpt_cond_latent.to("cuda")
+        speaker_embedding = speaker_embedding.to("cuda")
+        start_time = time.time()
+        chunks = tts.synthesizer.tts_model.inference_stream(text, language, gpt_cond_latent, speaker_embedding, enable_text_splitting=True, stream_chunk_size=7)
+        for i, chunk in enumerate(chunks):
+            if i == 0:
+                print(f"Time to first chunk: {round(time.time() - start_time, 2)}")
+            else:
+                print(f"Generated speech in {round((time.time() - start_time) / (len(chunk) / 24000.), 2)}x real time")
+            yield chunk.cpu().numpy()
+            start_time = time.time()
+
+        # return np.array(tts.tts(text=text, speaker=speaker, language='en'))
+    test_text = "How much wood would a woodchuck chuck if a woodchuck could chuck wood? Peter Piper picked a peck of pickled peppers."
+    for chunk in synthesize(test_text):
+        voice_clips_queue.put((chunk, 0, test_text, -1))
+
+    tts_ready.set()
+    print ("tts loaded")
+
+    while True:
+        (text, last_word_time, index) = tts_queue.get()
+        generating_response_number.value = index
+        if index >= skip_responses_before.value:
+            for chunk in synthesize(text):
+                if index < skip_responses_before.value:
+                    break
+                voice_clips_queue.put((chunk, text, last_word_time, index))
+        generating_response_number.value = -1
 
 def mic_process(audio_start_time, audio_queue):
     die_if_parent_process_dies_on_linux()
@@ -137,7 +187,7 @@ def whisper_process(audio_queue, segments, ignore_speech_before, segments_lock):
         # print (raw_segments)
         with segments_lock:
             segments[:] = [(round(start_of_window + segment.start - silence_buffer_s, 2), round(segment.end + start_of_window - silence_buffer_s, 2), segment.text)
-                            for segment in raw_segments if segment.no_speech_prob < 0.35]
+                            for segment in raw_segments if segment.no_speech_prob < 0.2]
 
 if __name__ == '__main__':
     multiprocessing.freeze_support()
@@ -170,9 +220,13 @@ if __name__ == '__main__':
     multiprocessing.Process(target=whisper_process, args=(audio_queue, segments, ignore_speech_before, segments_lock)).start()
 
     voice_clips_queue = multiprocessing.Queue()
-    stop_speaking_condition = multiprocessing.Condition()
-    ignore_voice_clips_before = multiprocessing.Value('d', 0)
-    multiprocessing.Process(target=play_voice_clips_process, args=(voice_clips_queue, stop_speaking_condition, audio_start_time, ignore_voice_clips_before)).start()
+    tts_queue = multiprocessing.Queue()
+    skip_responses_before = multiprocessing.Value('d', -1)
+    generating_response_number = multiprocessing.Value('d', -1)
+    last_response_spoken = multiprocessing.Value('d', -1)
+    tts_ready = multiprocessing.Event()
+    multiprocessing.Process(target=play_voice_clips_process, args=(voice_clips_queue, audio_start_time, skip_responses_before, last_response_spoken)).start()
+    multiprocessing.Process(target=tts_process, args=(tts_queue, voice_clips_queue, skip_responses_before, generating_response_number, tts_ready)).start()
 
     import time
     import os
@@ -180,7 +234,6 @@ if __name__ == '__main__':
     import warnings
     warnings.filterwarnings("ignore", category=UserWarning) 
 
-    from third_party.styletts2 import synthesize
     try:
         from exllama.chat import llm, remove_last_prompt
     except RuntimeError:
@@ -190,8 +243,9 @@ if __name__ == '__main__':
     # TODO figure out how to warm up exllama2
     print ("llm loaded")
 
-    synthesize('Hi.')
-    print ("tts initialized")
+    # Wait for tts to load
+    tts_ready.wait()
+
     multiprocessing.Process(target=mic_process, args=(audio_start_time, audio_queue)).start()
 
     # TODO: echo cancellation to filter out our own voice allowing the use of laptop speakers/mic
@@ -217,7 +271,7 @@ if __name__ == '__main__':
     llm_prompt = ''
     normalized_llm_prompt = ''
     last_debug_print = ''
-    voice_clips_enqueued = 0
+    response_number = 0
 
     while True:
         next_sentence_to_speak = None
@@ -245,8 +299,7 @@ if __name__ == '__main__':
             if sentences_spoken == 1:
                 print ("Latency to LLM response: " + str(round(latency, 2)))
                 response_interval_start = last_word_time
-            voice_clips_queue.put((synthesize(next_sentence_to_speak.strip(), speed=1), response_interval_start, next_sentence_to_speak.strip(), voice_clips_enqueued))
-            voice_clips_enqueued += 1
+            tts_queue.put((next_sentence_to_speak.strip(), response_interval_start, response_number))
 
         with segments_lock:
             # TODO: if a segment disappears this doesn't stop the llm from speaking, it probably should
@@ -275,15 +328,11 @@ if __name__ == '__main__':
                         to_speak = ''
                         last_word_time = segments[-1][1]
                         sentences_spoken = 0
-                        if not voice_clips_queue.empty():
-                            print (f"interrupting voice clips before {voice_clips_enqueued} because you said " + llm_prompt)
-                            ignore_voice_clips_before.value = voice_clips_enqueued
+                        response_number += 1
+                        if not voice_clips_queue.empty() or generating_response_number.value >= 0:
+                            print (f"interrupting voice clips before {response_number} because you said " + llm_prompt)
                             print ("latency to interrupting: " + str(round(time.perf_counter() - audio_start_time.value - last_word_time, 2)))
-                        ignore_voice_clips_before.value = voice_clips_enqueued
-                        with stop_speaking_condition:
-                            stop_speaking_condition.notify()
-                        with stop_speaking_condition:
-                            stop_speaking_condition.notify()
+                        skip_responses_before.value = response_number
                         print ("latency to prompting: " + str(round(time.perf_counter() - audio_start_time.value - last_word_time, 2)))
                     # else:
                     #     print ("user spoke a while ago, ignoring. last word time: " + str(segments[-1][1]) + " time: " + str(time.perf_counter() - audio_start_time.value))
