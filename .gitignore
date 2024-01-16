@@ -12,3 +12,5 @@ __pycache__
 /msix/**/*.user
 /msix/**/.vs/
 **/node_modules/
+/*.dll
+/*.wav
