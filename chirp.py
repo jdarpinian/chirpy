@@ -12,6 +12,7 @@ import signal
 signal.signal(signal.SIGINT, signal.SIG_DFL) # exit instantly on ctrl-c instead of throwing KeyboardInterrupt because it's not reliable, many blocking calls fail to be interrupted by KeyboardInterrupt
 import os
 import sys
+from chinese_splitter import split_languages, Lang
 running_in_pyinstaller = getattr(sys, 'frozen', False)
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True' # suppresses: OMP: Error #15: Initializing libiomp5md.dll, but found libiomp5md.dll already initialized.
 os.environ['NLTK_DATA'] = os.path.join(sys._MEIPASS, 'nltk_data') if running_in_pyinstaller else "/src/models/nltk_data"
@@ -48,6 +49,7 @@ def play_voice_clips_process(voice_clips_queue, audio_start_time, skip_responses
         if index < skip_responses_before.value:
             continue
         # voice_clip = librosa.effects.trim(voice_clip, top_db=20)[0]
+        # TODO: trim silence from start and end of responses. Tricky because the response is split into chunks now so we'll have to identify first and last chunks and potentially trim more than one chunk at a time.
         stream.write(voice_clip)
         last_response_spoken.value = index
         if last_word_time and last_response_index != index:
@@ -89,18 +91,19 @@ def tts_process(tts_queue, voice_clips_queue, skip_responses_before, generating_
             start_time = time.time()
 
         # return np.array(tts.tts(text=text, speaker=speaker, language='en'))
-    test_text = "How much wood would a woodchuck chuck if a woodchuck could chuck wood? Peter Piper picked a peck of pickled peppers."
-    for chunk in synthesize(test_text):
-        voice_clips_queue.put((chunk, 0, test_text, -1))
+    test_text = "This is an English and \"你好吗。 我没事。\" mixed sentence."
+    for (lang, text) in split_languages(test_text):
+        for chunk in synthesize(text, language=lang.name):
+            voice_clips_queue.put((chunk, 0, text, -1))
 
     tts_ready.set()
     print ("tts loaded")
 
     while True:
-        (text, last_word_time, index) = tts_queue.get()
+        ((lang, text), last_word_time, index) = tts_queue.get()
         generating_response_number.value = index
         if index >= skip_responses_before.value:
-            for chunk in synthesize(text):
+            for chunk in synthesize(text, language=lang.name):
                 if index < skip_responses_before.value:
                     break
                 voice_clips_queue.put((chunk, text, last_word_time, index))
@@ -274,32 +277,32 @@ if __name__ == '__main__':
     response_number = 0
 
     while True:
-        next_sentence_to_speak = None
+        next_segment_to_speak = None
         if llm_generator:
             try:
                 to_speak += next(llm_generator)
-                sentences = [sentence for line in to_speak.splitlines() for sentence in nltk.sent_tokenize(line)]
-                if len(sentences) > 1:
-                    next_sentence_to_speak = sentences[0]
+                segments = [segment for line in to_speak.splitlines() for sentence in nltk.sent_tokenize(line) for segment in split_languages(sentence) ]
+                if len(segments) > 1:
+                    next_segment_to_speak = segments[0]
                     to_speak = ' '.join(sentences[1:])
             except StopIteration:
                 if to_speak:
-                    next_sentence_to_speak = to_speak
+                    next_segment_to_speak = to_speak
                     to_speak = ''
                     llm_prompt = ''
                     llm_generator = None
                     with segments_lock:
                         segments[:] = []
                         ignore_speech_before.value = time.perf_counter() - audio_start_time.value
-        if next_sentence_to_speak:
+        if next_segment_to_speak:
             sentences_spoken += 1
-            # print ("speaking: " + next_sentence_to_speak)
+            # print ("speaking: " + next_segment_to_speak)
             latency = time.perf_counter() - audio_start_time.value - last_word_time
             response_interval_start = 0
             if sentences_spoken == 1:
                 print ("Latency to LLM response: " + str(round(latency, 2)))
                 response_interval_start = last_word_time
-            tts_queue.put((next_sentence_to_speak.strip(), response_interval_start, response_number))
+            tts_queue.put((next_segment_to_speak, response_interval_start, response_number))
 
         with segments_lock:
             # TODO: if a segment disappears this doesn't stop the llm from speaking, it probably should
